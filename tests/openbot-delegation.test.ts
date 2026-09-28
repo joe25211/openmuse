@@ -311,6 +311,19 @@ test("named resource fallback sends only relevant authorized lines and user supp
       JSON.stringify(suppliedTask),
       /PROMPT_SENTINEL|CAMEL_PROMPT_SENTINEL|PREFIXED_KEY_SENTINEL|BRIEF_SENTINEL|ACCESS_KEY_SENTINEL|CONTENT_SENTINEL/,
     );
+    const multiline = await f.request("conversation-1", {
+      requestId: "multiline-credential",
+      botId: "bot-1",
+      prompt:
+        'Summarize supplied notes\nACME_PRIVATE_KEY="alpha beta\ngamma"\nKeep this instruction',
+      brief: "OPENAI_API_KEY=\nKeep the empty assignment separate",
+      suppliedText: "garden facts supplied by the user",
+    });
+    assert.equal(multiline.status, 201, await multiline.clone().text());
+    const multilineContext = ((await multiline.json()) as AgentTask).delegation?.sentContext ?? "";
+    assert.doesNotMatch(multilineContext, /alpha beta|gamma/);
+    assert.match(multilineContext, /Keep this instruction/);
+    assert.match(multilineContext, /Keep the empty assignment separate/);
     assert.equal(
       (
         await f.request("conversation-1", {
