@@ -203,6 +203,18 @@ test("named resource fallback sends only relevant authorized lines and user supp
       ((await dotFile.json()) as AgentTask).delegation?.sentContext ?? "",
       /valid dot-prefixed notes/,
     );
+    const credentialFilename = "Authorization: Basic Zm9vYmFy.txt";
+    await writeFile(join(ownerPath, credentialFilename), "garden roses from unsafe filename");
+    assert.equal(
+      (
+        await f.request("conversation-1", {
+          ...input,
+          requestId: "credential-filename",
+          sourcePath: credentialFilename,
+        })
+      ).status,
+      422,
+    );
     await writeFile(
       join(ownerPath, "unsafe.txt"),
       "garden roses private key: UNSAFE_ONLY_SENTINEL",
@@ -255,7 +267,7 @@ test("named resource fallback sends only relevant authorized lines and user supp
       botId: "bot-1",
       prompt: "Summarize this Bearer PROMPT_SENTINEL",
       brief: "api_key=BRIEF_SENTINEL",
-      suppliedText: "garden facts supplied by the user token: CONTENT_SENTINEL",
+      suppliedText: "garden facts supplied by the user\ntoken: CONTENT_SENTINEL",
     });
     assert.equal(supplied.status, 201, await supplied.clone().text());
     const suppliedTask = (await supplied.json()) as AgentTask;
@@ -263,6 +275,17 @@ test("named resource fallback sends only relevant authorized lines and user supp
     assert.doesNotMatch(
       JSON.stringify(suppliedTask),
       /PROMPT_SENTINEL|BRIEF_SENTINEL|CONTENT_SENTINEL/,
+    );
+    assert.equal(
+      (
+        await f.request("conversation-1", {
+          requestId: "unsafe-supplied-only",
+          botId: "bot-1",
+          prompt: "Summarize supplied notes",
+          suppliedText: "Authorization: Basic Zm9vYmFy",
+        })
+      ).status,
+      422,
     );
     f.setTools([{ ref: "host/shell" }]);
     assert.equal((await f.request("conversation-1", { ...input, requestId: "broad" })).status, 409);
@@ -274,12 +297,13 @@ test("named resource fallback sends only relevant authorized lines and user supp
 test("a saved pre-fix excerpt is sanitized before its first submission", async (t) => {
   const f = await fixture();
   try {
-    const response = await f.request("conversation-1", {
+    const input = {
       requestId: "saved-excerpt",
       botId: "bot-1",
       prompt: "Summarize garden notes",
-      suppliedText: "safe garden notes",
-    });
+      suppliedText: "garden Authorization: Basic QmFzaWNBdXRoMTIz\nsafe garden notes",
+    };
+    const response = await f.request("conversation-1", input);
     assert.equal(response.status, 201);
     const task = (await response.json()) as AgentTask;
     assert(task.delegation);
@@ -308,6 +332,9 @@ test("a saved pre-fix excerpt is sanitized before its first submission", async (
     assert.equal(run.mock.callCount(), 1);
     const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
     assert.doesNotMatch(JSON.stringify(saved?.delegation), /QmFzaWNBdXRoMTIz/);
+    const duplicate = await f.request("conversation-1", input);
+    assert.equal(duplicate.status, 201);
+    assert.equal(((await duplicate.json()) as AgentTask).id, task.id);
     const second = await f.request("conversation-1", {
       requestId: "saved-unsafe-only",
       botId: "bot-1",
@@ -348,6 +375,25 @@ test("a saved pre-fix excerpt is sanitized before its first submission", async (
     const stillUncertain = await f.db.get<AgentTask>(f.owner, "tasks", channelAttempted.id);
     assert.notEqual(stillUncertain?.status, "failed");
     assert.equal(stillUncertain?.delegation?.submissionAttempted, false);
+    assert.equal(run.mock.callCount(), 1);
+    const oldPath = await f.request("conversation-1", {
+      requestId: "saved-unsafe-path",
+      botId: "bot-1",
+      prompt: "Summarize garden notes",
+      suppliedText: "safe original text",
+    });
+    const pathTask = (await oldPath.json()) as AgentTask;
+    assert(pathTask.delegation);
+    await f.db.put(f.owner, "tasks", {
+      ...pathTask,
+      delegation: {
+        ...pathTask.delegation,
+        sourcePath: "Authorization: Basic VW5zYWZlQXV0aA==.txt",
+        sentContext: "pre-fix path VW5zYWZlQXV0aA==",
+      },
+    });
+    await f.server.agent.worker.tick();
+    assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", pathTask.id))?.status, "failed");
     assert.equal(run.mock.callCount(), 1);
   } finally {
     await f.close();

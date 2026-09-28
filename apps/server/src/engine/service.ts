@@ -59,6 +59,19 @@ const unsafeExcerptLine = (line: string) =>
     line,
   );
 
+const safeIncludedText = (text?: string) => {
+  const safe = text
+    ? redact(
+        text
+          .split(/\r?\n/)
+          .filter((line) => !unsafeExcerptLine(line))
+          .join("\n")
+          .slice(0, 4000),
+      ).trim()
+    : "";
+  return safe || undefined;
+};
+
 async function namedText(root: string | undefined, path: string) {
   const parts = path.split(/[\\/]/);
   if (!root || isAbsolute(path) || parts.some((part) => !part || part === "." || part === ".."))
@@ -393,6 +406,8 @@ export class AgentService {
     const existing = await this.db.get<AgentTask>(owner, "tasks", id);
     const safePrompt = redact(input.prompt.trim());
     const safeBrief = input.brief ? redact(input.brief.trim()) : undefined;
+    if (input.sourcePath && unsafeExcerptLine(input.sourcePath))
+      throw new AppError("This named resource cannot be sent safely; supply its text", 422);
     const resourcePath = input.sourcePath
       ? `${hash(owner).slice(0, 24)}/${input.sourcePath}`
       : undefined;
@@ -403,10 +418,11 @@ export class AgentService {
         })
       : null;
     const sourceExcerpt = sourceText
-      ? relevantExcerpt(sourceText, `${safePrompt} ${safeBrief ?? ""}`)
+      ? safeIncludedText(relevantExcerpt(sourceText, `${safePrompt} ${safeBrief ?? ""}`))
       : undefined;
-    const fallbackExcerpt =
-      sourceExcerpt || (input.suppliedText ? redact(input.suppliedText.trim()) : undefined);
+    const fallbackExcerpt = sourceExcerpt || safeIncludedText(input.suppliedText?.trim());
+    if (input.suppliedText && !fallbackExcerpt)
+      throw new AppError("No safe supplied text was found; remove credentials and try again", 422);
     if (input.sourcePath && !fallbackExcerpt)
       throw new AppError("No relevant excerpt was found; supply the text to include", 422);
     const mode =
@@ -442,7 +458,7 @@ export class AgentService {
         existing.delegation.brief !== safeBrief ||
         existing.delegation.sourcePath !== input.sourcePath ||
         existing.delegation.resourcePath !== resourcePath ||
-        existing.delegation.fallbackExcerpt !== fallbackExcerpt
+        safeIncludedText(existing.delegation.fallbackExcerpt) !== fallbackExcerpt
       )
         throw new AppError("This request already has a different task", 409);
       return existing;
@@ -1188,15 +1204,15 @@ export class AgentService {
       });
     };
     if (!delegation.submissionAttempted) {
-      const safeExcerpt = delegation.fallbackExcerpt
-        ? redact(
-            delegation.fallbackExcerpt
-              .split(/\r?\n/)
-              .filter((line) => !unsafeExcerptLine(line))
-              .join("\n")
-              .slice(0, 4000),
-          )
-        : undefined;
+      const safeExcerpt = safeIncludedText(delegation.fallbackExcerpt);
+      if (delegation.sourcePath && unsafeExcerptLine(delegation.sourcePath)) {
+        if (delegation.channelAttempted && !delegation.threadId) return pending(true);
+        return {
+          status: "failed",
+          error: "This named resource cannot be sent safely; supply its text",
+          delegation,
+        };
+      }
       const safeContext = sentContext({
         prompt: task.prompt,
         brief: delegation.brief,
