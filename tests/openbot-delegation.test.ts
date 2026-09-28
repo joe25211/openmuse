@@ -299,8 +299,9 @@ test("named resource fallback sends only relevant authorized lines and user supp
     const supplied = await f.request("conversation-1", {
       requestId: "supplied",
       botId: "bot-1",
-      prompt: "Summarize this Bearer PROMPT_SENTINEL sessionToken=CAMEL_PROMPT_SENTINEL",
-      brief: "api_key=BRIEF_SENTINEL",
+      prompt:
+        "Summarize this Bearer PROMPT_SENTINEL sessionToken=CAMEL_PROMPT_SENTINEL OPENAI_API_KEY=PREFIXED_KEY_SENTINEL",
+      brief: "api_key=BRIEF_SENTINEL AWS_SECRET_ACCESS_KEY=ACCESS_KEY_SENTINEL",
       suppliedText: "garden facts supplied by the user\ntoken: CONTENT_SENTINEL",
     });
     assert.equal(supplied.status, 201, await supplied.clone().text());
@@ -308,7 +309,7 @@ test("named resource fallback sends only relevant authorized lines and user supp
     assert.match(suppliedTask.delegation?.sentContext ?? "", /garden facts supplied by the user/);
     assert.doesNotMatch(
       JSON.stringify(suppliedTask),
-      /PROMPT_SENTINEL|CAMEL_PROMPT_SENTINEL|BRIEF_SENTINEL|CONTENT_SENTINEL/,
+      /PROMPT_SENTINEL|CAMEL_PROMPT_SENTINEL|PREFIXED_KEY_SENTINEL|BRIEF_SENTINEL|ACCESS_KEY_SENTINEL|CONTENT_SENTINEL/,
     );
     assert.equal(
       (

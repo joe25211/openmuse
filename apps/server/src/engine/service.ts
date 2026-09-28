@@ -52,9 +52,8 @@ const redact = (text: string) =>
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
     .replace(/\bAuthorization\s*:\s*Basic\s+\S+/gi, "Authorization: Basic [redacted]")
     .replace(/\b(https?:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
-    .replace(/\b(?:api[_-]?key|token|cookie|password|secret)\s*[:=]\s*\S+/gi, "[redacted]")
     .replace(
-      /\b[a-z0-9_]+(?:token|cookie|password|secret|credential)\s*[:=]\s*\S+/gi,
+      /\b[a-z0-9_]*(?:(?:api|private|access)[\s_-]?key|token|cookie|password|secret|credential)\s*[:=]\s*\S+/gi,
       "[redacted]",
     );
 
