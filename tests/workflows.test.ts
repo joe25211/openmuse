@@ -175,6 +175,7 @@ test("approval claim winning a cancel race keeps the task open for the external 
   await assert.rejects(server.agent.control(owner, task.id, "pause"), /may still change/i);
   finishProvider.resolve("Provider receipt");
   assert.equal((await approving).status, "succeeded");
+  await assert.rejects(server.agent.control(owner, task.id, "cancel"), /already completed/i);
   await server.agent.worker.tick();
   assert.equal((await server.agent.getTask(owner, task.id)).status, "succeeded");
 });

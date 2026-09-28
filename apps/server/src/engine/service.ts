@@ -245,6 +245,8 @@ export class AgentService {
         "This action may still change the connected app. Check the linked action before changing this task.",
         409,
       );
+    if (action === "cancel" && linked?.status === "succeeded")
+      throw new AppError("This reviewed action already completed. Check its result first.", 409);
     if (action === "cancel" && task.status === "succeeded")
       throw new AppError("This task is already complete", 409);
     if (action === "retry" && task.status !== "failed")
