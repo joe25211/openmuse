@@ -82,6 +82,7 @@
     .c-task { max-width:600px; margin:auto; }
     .c-task h2 { font-size:25px; line-height:1.18; color:#ddd; margin:8px 0 12px; }
     .c-task .card { margin:18px 0; }
+    .variant-C #stage { touch-action:pan-y; overscroll-behavior-x:contain; }
     .timeline { list-style:none; padding:0; margin:16px 0; }
     .timeline li { border-left:2px solid var(--line); padding:0 0 17px 15px; color:var(--muted); font-size:13px; }
     .timeline li:last-child { padding-bottom:0; }
@@ -141,7 +142,7 @@
   <script>
     const variants = { A: "Inline task card", B: "Persistent task rail", C: "Chat / task tabs" };
     const params = new URLSearchParams(location.search);
-    let variant = variants[params.get("variant")] ? params.get("variant") : "A";
+    let variant = variants[params.get("variant")] ? params.get("variant") : "C";
     let state = ["running", "completed", "failed", "needs-input"].includes(params.get("state")) ? params.get("state") : "running";
     let failureMode = "reported";
     let pane = "chat";
@@ -215,6 +216,36 @@
       const next = new URL(location.href); next.searchParams.set("variant", variant); history.replaceState(null, "", next);
       render();
     }
+    function swipePane(dx, dy) {
+      if (Math.abs(dx) < 48 || Math.abs(dx) <= Math.abs(dy)) return null;
+      return dx < 0 ? "task" : "chat";
+    }
+    const stage = document.getElementById("stage");
+    let touchStart = null;
+    let wheelX = 0;
+    let wheelReset;
+    stage.addEventListener("touchstart", event => {
+      touchStart = variant === "C" && event.touches.length === 1
+        ? [event.touches[0].clientX, event.touches[0].clientY] : null;
+    }, { passive: true });
+    stage.addEventListener("touchend", event => {
+      if (!touchStart || variant !== "C") return;
+      const [x, y] = touchStart;
+      touchStart = null;
+      const touch = event.changedTouches[0];
+      const next = swipePane(touch.clientX - x, touch.clientY - y);
+      if (next && next !== pane) { pane = next; render(); }
+    }, { passive: true });
+    stage.addEventListener("touchcancel", () => { touchStart = null; });
+    stage.addEventListener("wheel", event => {
+      if (variant !== "C" || Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+      event.preventDefault();
+      wheelX += event.deltaX;
+      clearTimeout(wheelReset);
+      wheelReset = setTimeout(() => { wheelX = 0; }, 180);
+      const next = swipePane(-wheelX, 0);
+      if (next && next !== pane) { pane = next; wheelX = 0; render(); }
+    }, { passive: false });
     document.getElementById("prev").addEventListener("click", () => changeVariant(-1));
     document.getElementById("next").addEventListener("click", () => changeVariant(1));
     document.getElementById("state").addEventListener("change", event => { state = event.target.value; const next = new URL(location.href); next.searchParams.set("state", state); history.replaceState(null, "", next); render(); });
@@ -233,6 +264,7 @@
     });
     render();
     console.assert(["A", "B", "C"].every(key => variants[key]) && ["running", "completed", "failed", "needs-input"].every(key => stateData[key]), "Prototype variant/state matrix is incomplete");
+    console.assert(swipePane(-60, 5) === "task" && swipePane(60, 5) === "chat" && swipePane(20, 80) === null, "Swipe direction/scroll guard failed");
   </script>
 </body>
 </html>
