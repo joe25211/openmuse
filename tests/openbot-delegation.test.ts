@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +49,7 @@ async function fixture() {
     allowedOrigins: [],
     openbotEnabled: true,
     openbotBaseUrl: `http://127.0.0.1:${address.port}`,
+    openbotScopedReadRoot: directory,
   };
   let server = await createApp(db, config);
   const session = await server.app.request("/api/session", {
@@ -74,6 +76,7 @@ async function fixture() {
     get db() {
       return db;
     },
+    directory,
     owner,
     token,
     request,
@@ -98,6 +101,66 @@ async function fixture() {
     },
   };
 }
+
+test("named resource fallback sends only relevant authorized lines and user supplied text", async () => {
+  const f = await fixture();
+  try {
+    const ownerPath = join(
+      f.directory,
+      createHash("sha256").update(f.owner).digest("hex").slice(0, 24),
+    );
+    await mkdir(ownerPath);
+    await writeFile(
+      join(ownerPath, "garden.txt"),
+      [
+        "garden roses need sunlight",
+        "unrelated PRIVATE_SENTINEL_COOKIE=keep-out",
+        "garden roses need water",
+      ].join("\n"),
+    );
+    const input = {
+      requestId: "scoped-fallback",
+      botId: "bot-1",
+      prompt: "Summarize garden roses",
+      sourcePath: "garden.txt",
+    };
+    const response = await f.request("conversation-1", input);
+    assert.equal(response.status, 201, await response.clone().text());
+    const task = (await response.json()) as AgentTask;
+    assert.equal(task.delegation?.readMode, "excerpt");
+    assert.match(task.delegation.sentContext, /garden roses need sunlight/);
+    assert.match(task.delegation.sentContext, /garden roses need water/);
+    assert.doesNotMatch(task.delegation.sentContext, /PRIVATE_SENTINEL/);
+    assert.equal(
+      (
+        await f.request("conversation-1", {
+          ...input,
+          requestId: "traversal",
+          sourcePath: "../private.txt",
+        })
+      ).status,
+      422,
+    );
+    const supplied = await f.request("conversation-1", {
+      requestId: "supplied",
+      botId: "bot-1",
+      prompt: "Summarize this Bearer PROMPT_SENTINEL",
+      brief: "api_key=BRIEF_SENTINEL",
+      suppliedText: "garden facts supplied by the user token: CONTENT_SENTINEL",
+    });
+    assert.equal(supplied.status, 201, await supplied.clone().text());
+    const suppliedTask = (await supplied.json()) as AgentTask;
+    assert.match(suppliedTask.delegation?.sentContext ?? "", /garden facts supplied by the user/);
+    assert.doesNotMatch(
+      JSON.stringify(suppliedTask),
+      /PROMPT_SENTINEL|BRIEF_SENTINEL|CONTENT_SENTINEL/,
+    );
+    f.setTools([{ ref: "host/shell" }]);
+    assert.equal((await f.request("conversation-1", { ...input, requestId: "broad" })).status, 409);
+  } finally {
+    await f.close();
+  }
+});
 
 test("authenticated named Bot task persists its attempt before dispatch and reloads the answer", async (t) => {
   const f = await fixture();
@@ -140,7 +203,10 @@ test("authenticated named Bot task persists its attempt before dispatch and relo
         assert.equal(before?.delegation?.threadId, threadId);
         assert.equal(before?.delegation?.runId, runId);
         assert.equal(botId, "bot-1");
-        assert.equal(text, "Task: Summarize this text\nRelevant brief: It is about a garden.");
+        assert.equal(text, created.delegation?.sentContext);
+        assert.match(text, /^Task: Summarize this text\nRelevant brief: It is about a garden\./);
+        assert.match(text, /Conversation ID: conversation-1/);
+        assert.match(text, /Run ID: /);
         await onStartup();
         return { terminal: "finished" as const, messageIds: ["answer-1"] };
       },

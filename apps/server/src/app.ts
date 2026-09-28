@@ -218,6 +218,8 @@ export async function createApp(
         botId: z.string().trim().min(1).max(128),
         prompt: z.string().trim().min(1).max(12000),
         brief: z.string().trim().max(500).optional(),
+        sourcePath: z.string().trim().min(1).max(2048).optional(),
+        suppliedText: z.string().trim().min(1).max(4000).optional(),
       })
       .parse(await c.req.json());
     return c.json(

@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { z } from "zod";
 import {
   OpenBotAdapter,
@@ -33,9 +34,11 @@ const channelsSchema = z.object({
 export class OpenBotGateway {
   private readonly base?: URL;
   private readonly adapter: OpenBotAdapter;
+  private readonly scopedReadToken?: string;
   private probeCache?: { expiresAt: number; result: ReturnType<OpenBotAdapter["probe"]> };
 
   constructor(config: Config) {
+    this.scopedReadToken = config.openbotScopedReadToken?.trim();
     if (config.openbotEnabled) {
       if (!config.openbotBaseUrl) throw new Error("OPENBOT_BASE_URL is required when enabled");
       const base = new URL(config.openbotBaseUrl);
@@ -105,6 +108,31 @@ export class OpenBotGateway {
     return this.adapter.createConversation(botId, AbortSignal.timeout(10000));
   }
 
+  async bindScopedRead(
+    taskId: string,
+    botId: string,
+    threadId: string,
+    runId: string,
+    path: string,
+  ) {
+    if (!this.scopedReadToken) throw new AppError("Scoped reads are unavailable", 503);
+    const runSecret = createHmac("sha256", this.scopedReadToken)
+      .update(JSON.stringify([taskId, botId, threadId, runId, path]))
+      .digest("base64url");
+    const response = await fetch(new URL("/api/openmuse/scoped-runs", this.requireBase()), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.scopedReadToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ taskId, botId, threadId, runId, path, runSecret }),
+      redirect: "error",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new AppError("Scoped reads are unavailable", 503);
+    return runSecret;
+  }
+
   runText(
     botId: string,
     threadId: string,
@@ -113,8 +141,18 @@ export class OpenBotGateway {
     onStartup: () => Promise<void>,
     signal: AbortSignal,
     onEvent?: (event: OpenBotRunObservation) => Promise<void>,
+    scopeSecret?: string,
   ) {
-    return this.adapter.runText(botId, threadId, runId, text, onStartup, signal, onEvent);
+    return this.adapter.runText(
+      botId,
+      threadId,
+      runId,
+      text,
+      onStartup,
+      signal,
+      onEvent,
+      scopeSecret,
+    );
   }
 
   reconnectRun(

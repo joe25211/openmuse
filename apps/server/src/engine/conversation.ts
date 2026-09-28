@@ -234,6 +234,8 @@ export class ConversationAgent extends AbstractAgent {
           botId: z.string().trim().min(1).max(128),
           prompt: z.string().trim().min(1).max(12000),
           brief: z.string().trim().max(500).optional(),
+          sourcePath: z.string().trim().min(1).max(2048).optional(),
+          suppliedText: z.string().trim().min(1).max(4000).optional(),
         }),
         execute: async (args) =>
           this.service.createDelegatedTask(this.owner, {

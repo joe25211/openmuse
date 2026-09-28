@@ -79,6 +79,7 @@ test("a saved answer must have a message ID emitted by the matching run", async 
     assert.match(path, /\/messages\?/);
     return Response.json({
       messages: [
+        { id: "tool-call", role: "assistant", toolCalls: [{ name: "read_named_resource" }] },
         { id: "answer-1", role: "assistant", content: "The linked answer" },
         { id: "other-answer", role: "assistant", content: "Another native chat reply" },
       ],

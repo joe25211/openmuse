@@ -96,7 +96,7 @@ const hostSchema = z.object({
   pending: z.array(z.object({ botId: nonempty })),
 });
 const historySchema = z.object({
-  messages: z.array(z.object({ id: nonempty, role: z.string(), content: z.unknown() })),
+  messages: z.array(z.object({ id: nonempty, role: z.string(), content: z.unknown().optional() })),
 });
 const errorSchema = z.object({ error: z.string().optional(), rule: z.string().optional() });
 export interface OpenBotRunObservation {
@@ -213,6 +213,7 @@ export class OpenBotAdapter {
     onStartup: () => Promise<void>,
     signal?: AbortSignal,
     onEvent?: (event: OpenBotRunObservation) => Promise<void>,
+    scopeSecret?: string,
   ): Promise<{
     terminal: "finished" | "error" | "unconfirmed";
     messageIds: string[];
@@ -228,6 +229,7 @@ export class OpenBotAdapter {
       onStartup,
       signal,
       onEvent,
+      scopeSecret,
     );
   }
 
@@ -262,6 +264,7 @@ export class OpenBotAdapter {
     onStartup?: () => Promise<void>,
     signal?: AbortSignal,
     onEvent?: (event: OpenBotRunObservation) => Promise<void>,
+    scopeSecret?: string,
   ): Promise<{
     terminal: "finished" | "error" | "unconfirmed";
     messageIds: string[];
@@ -314,7 +317,7 @@ export class OpenBotAdapter {
       state: {},
       tools: [],
       context: [],
-      forwardedProps: {},
+      forwardedProps: scopeSecret ? { openmuseScopedRunSecret: scopeSecret } : {},
     };
     return new Promise((resolve, reject) => {
       let settled = false;

@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { open, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { CopilotKitIntelligence } from "@copilotkit/runtime/v2";
 import { z } from "zod";
 import type { OpenBotRunObservation } from "../../../../packages/backends/src/openbot.ts";
@@ -44,6 +47,85 @@ import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const date = () => new Date().toISOString();
 const terminal = new Set(["succeeded", "failed", "cancelled"]);
+const redact = (text: string) =>
+  text
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\b(?:api[_-]?key|token|cookie|password|secret)\s*[:=]\s*\S+/gi, "[redacted]");
+
+async function namedText(root: string | undefined, path: string) {
+  if (!root || isAbsolute(path) || path.split(/[\\/]/).includes(".."))
+    throw new AppError("This named resource cannot be read safely; supply its text", 422);
+  try {
+    const base = await realpath(root);
+    const target = await realpath(resolve(base, path));
+    const inside = relative(base, target);
+    if (!inside || inside.startsWith("..") || isAbsolute(inside)) throw new Error();
+    const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await handle.stat();
+      if (
+        (await realpath(`/proc/self/fd/${handle.fd}`)) !== target ||
+        !info.isFile() ||
+        info.size > 64 * 1024
+      )
+        throw new Error();
+      const text = await handle.readFile("utf8");
+      if (text.includes("\0")) throw new Error();
+      return text;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    throw new AppError("This named resource cannot be read safely; supply its text", 422);
+  }
+}
+
+function relevantExcerpt(text: string, request: string) {
+  const words = new Set(
+    (request.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []).filter(
+      (word) => !["this", "that", "with", "from", "please", "summarize"].includes(word),
+    ),
+  );
+  return redact(
+    text
+      .split(/\r?\n/)
+      .filter((line) => [...words].some((word) => line.toLowerCase().includes(word)))
+      .slice(0, 6)
+      .join("\n")
+      .slice(0, 4000),
+  );
+}
+
+function sentContext(input: {
+  prompt: string;
+  brief?: string;
+  sourcePath?: string;
+  resourcePath?: string;
+  excerpt?: string;
+  mode?: "direct" | "excerpt" | "supplied";
+  conversationId: string;
+  requestId: string;
+  botId: string;
+  runId: string;
+}) {
+  return [
+    `Task: ${redact(input.prompt.trim())}`,
+    ...(input.brief?.trim() ? [`Relevant brief: ${redact(input.brief.trim())}`] : []),
+    ...(input.sourcePath
+      ? [
+          `Named resource: ${input.sourcePath} (${input.mode === "direct" ? "read-only direct access" : input.mode === "supplied" ? "user-supplied content" : "excerpt only"})`,
+        ]
+      : []),
+    ...(input.mode === "direct" && input.resourcePath
+      ? [`Resource ID: ${input.resourcePath}`]
+      : []),
+    ...(input.excerpt ? [`Included excerpt:\n${input.excerpt}`] : []),
+    `Conversation ID: ${input.conversationId}`,
+    `Request ID: ${input.requestId}`,
+    `Bot ID: ${input.botId}`,
+    `Run ID: ${input.runId}`,
+  ].join("\n");
+}
 export class AgentService {
   readonly worker: TaskWorker;
   private maintenance?: ReturnType<typeof setInterval>;
@@ -244,6 +326,8 @@ export class AgentService {
       botId: string;
       prompt: string;
       brief?: string;
+      sourcePath?: string;
+      suppliedText?: string;
     },
   ) {
     const main = await this.db.get<{ threadId: string }>(owner, "conversation-settings", "main");
@@ -279,16 +363,56 @@ export class AgentService {
         }
       }
     }
-    const sentContext = `Task: ${input.prompt.trim()}${input.brief?.trim() ? `\nRelevant brief: ${input.brief.trim()}` : ""}`;
     const key = `openbot:${input.conversationId}:${input.requestId}`;
     const id = hash(`task:${key}`);
     const existing = await this.db.get<AgentTask>(owner, "tasks", id);
+    const safePrompt = redact(input.prompt.trim());
+    const safeBrief = input.brief ? redact(input.brief.trim()) : undefined;
+    const resourcePath = input.sourcePath
+      ? `${hash(owner).slice(0, 24)}/${input.sourcePath}`
+      : undefined;
+    const sourceText = resourcePath
+      ? await namedText(this.config.openbotScopedReadRoot, resourcePath).catch((error) => {
+          if (input.suppliedText) return null;
+          throw error;
+        })
+      : null;
+    const fallbackExcerpt = sourceText
+      ? relevantExcerpt(sourceText, `${safePrompt} ${safeBrief ?? ""}`)
+      : input.suppliedText
+        ? redact(input.suppliedText.trim())
+        : undefined;
+    if (input.sourcePath && !fallbackExcerpt)
+      throw new AppError("No relevant excerpt was found; supply the text to include", 422);
+    const mode =
+      input.sourcePath && sourceText && this.config.openbotScopedReadToken
+        ? ("direct" as const)
+        : sourceText
+          ? ("excerpt" as const)
+          : input.suppliedText
+            ? ("supplied" as const)
+            : undefined;
+    const formatted = (runId: string, botId: string) =>
+      sentContext({
+        ...input,
+        prompt: safePrompt,
+        brief: safeBrief,
+        botId,
+        runId,
+        resourcePath,
+        mode,
+        excerpt: mode === "direct" ? undefined : fallbackExcerpt,
+      });
     if (existing) {
       if (
         !existing.delegation ||
         (existing.delegation.botId !== input.botId &&
           existing.delegation.botName.toLowerCase() !== input.botId.toLowerCase()) ||
-        existing.delegation.sentContext !== sentContext
+        existing.prompt !== safePrompt ||
+        existing.delegation.brief !== safeBrief ||
+        existing.delegation.sourcePath !== input.sourcePath ||
+        existing.delegation.resourcePath !== resourcePath ||
+        existing.delegation.fallbackExcerpt !== fallbackExcerpt
       )
         throw new AppError("This request already has a different task", 409);
       return existing;
@@ -300,10 +424,11 @@ export class AgentService {
         .length >= 100
     )
       throw new AppError("Finish or cancel some tasks before adding more", 409);
+    const runId = randomUUID();
     const task: AgentTask = {
       id,
-      title: input.prompt.slice(0, 90),
-      prompt: input.prompt,
+      title: safePrompt.slice(0, 90),
+      prompt: safePrompt,
       kind: "openbot",
       status: "queued",
       plan: [],
@@ -321,8 +446,13 @@ export class AgentService {
         requestId: input.requestId,
         botId: bot.id,
         botName: bot.name,
-        sentContext,
-        runId: randomUUID(),
+        brief: safeBrief,
+        sentContext: formatted(runId, bot.id),
+        sourcePath: input.sourcePath,
+        resourcePath,
+        fallbackExcerpt,
+        readMode: mode,
+        runId,
         channelAttempted: false,
         submissionAttempted: false,
       },
@@ -331,7 +461,12 @@ export class AgentService {
     await this.db.insertIfAbsent(owner, "tasks", task);
     const latest = await this.getTask(owner, id);
     if (
-      latest.delegation?.sentContext !== sentContext ||
+      !latest.delegation ||
+      latest.prompt !== safePrompt ||
+      latest.delegation.brief !== safeBrief ||
+      latest.delegation.sourcePath !== input.sourcePath ||
+      latest.delegation.resourcePath !== resourcePath ||
+      latest.delegation.fallbackExcerpt !== fallbackExcerpt ||
       latest.delegation.botId !== bot.id ||
       latest.delegation.conversationId !== input.conversationId
     )
@@ -1044,6 +1179,56 @@ export class AgentService {
           delegation,
         };
       }
+      let scopeSecret: string | undefined;
+      if (delegation.readMode === "direct") {
+        if (!delegation.resourcePath)
+          return {
+            status: "failed",
+            error: "No safe named-resource read or excerpt is available",
+            delegation,
+          };
+        try {
+          scopeSecret = await gateway.bindScopedRead(
+            task.id,
+            delegation.botId,
+            delegation.threadId,
+            delegation.runId,
+            delegation.resourcePath,
+          );
+        } catch (error) {
+          if (error instanceof LostLeaseError) throw error;
+          if (!delegation.fallbackExcerpt)
+            return {
+              status: "failed",
+              error: "No safe named-resource read or excerpt is available",
+              delegation,
+            };
+          await save({
+            readMode: "excerpt",
+            sentContext: sentContext({
+              prompt: task.prompt,
+              brief: delegation.brief,
+              sourcePath: delegation.sourcePath,
+              resourcePath: delegation.resourcePath,
+              excerpt: delegation.fallbackExcerpt,
+              mode: "excerpt",
+              conversationId: delegation.conversationId,
+              requestId: delegation.requestId,
+              botId: delegation.botId,
+              runId: delegation.runId,
+            }),
+          });
+        }
+      }
+      try {
+        await gateway.eligibleBot(delegation.botId);
+      } catch {
+        return {
+          status: "failed",
+          error: "The named Bot is no longer eligible for a text-only task",
+          delegation,
+        };
+      }
       await save({ submissionAttempted: true, lastProgressAt: now() });
       try {
         const run = await gateway.runText(
@@ -1054,6 +1239,7 @@ export class AgentService {
           () => save({ startupAcknowledged: true, lastProgressAt: now() }),
           context.signal,
           observe,
+          scopeSecret,
         );
         if (run.terminal !== "unconfirmed" && !delegation.terminal)
           await save({ terminal: run.terminal, messageIds: run.messageIds });

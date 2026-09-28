@@ -16,7 +16,12 @@ export interface TaskDelegation {
   requestId: string;
   botId: string;
   botName: string;
+  brief?: string;
   sentContext: string;
+  sourcePath?: string;
+  resourcePath?: string;
+  fallbackExcerpt?: string;
+  readMode?: "direct" | "excerpt" | "supplied";
   runId: string;
   channelAttempted: boolean;
   channelId?: string;

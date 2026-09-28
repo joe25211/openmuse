@@ -45,6 +45,8 @@ export interface Config {
   composioApiKey?: string;
   openbotEnabled?: boolean;
   openbotBaseUrl?: string;
+  openbotScopedReadRoot?: string;
+  openbotScopedReadToken?: string;
   googleRedirectUri: string;
   workerUrl?: string;
   workerToken?: string;
@@ -115,6 +117,8 @@ export function readConfig(): Config {
     composioApiKey: process.env.COMPOSIO_API_KEY,
     openbotEnabled: process.env.OPENBOT_ENABLED === "true",
     openbotBaseUrl: process.env.OPENBOT_BASE_URL,
+    openbotScopedReadRoot: process.env.OPENMUSE_SCOPED_READ_ROOT,
+    openbotScopedReadToken: process.env.OPENMUSE_SCOPED_READ_TOKEN,
     googleRedirectUri: `${publicUrl}/api/google/callback`,
     workerUrl: process.env.BROWSER_WORKER_URL,
     workerToken: process.env.WORKER_TOKEN,
