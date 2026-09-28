@@ -103,6 +103,48 @@ test("a saved answer must have a message ID emitted by the matching run", async 
   assert.equal(await adapter.textResult("bot-1", "thread-1", ["missing"]), "");
 });
 
+test("reconnect uses the saved cursor and ignores another run's events", async (t) => {
+  const { adapter, transport } = fixture(() => {
+    throw new Error("reconnect must not submit a run");
+  });
+  transport.socketUrl = "ws://openbot.example/socket";
+  const prototype = IntelligenceAgent.prototype as unknown as {
+    connect(input: unknown): Observable<unknown>;
+    getLastSeenEventId(threadId: string): string | null;
+  };
+  t.mock.method(prototype, "connect", function (this: typeof prototype) {
+    assert.equal(this.getLastSeenEventId("thread-1"), "event-2");
+    return new Observable((subscriber) => {
+      subscriber.next({ type: "RUN_STARTED", threadId: "other-thread", runId: "run-1" });
+      subscriber.next({ type: "TEXT_MESSAGE_START", role: "assistant", messageId: "wrong" });
+      subscriber.next({ type: "RUN_FINISHED", threadId: "thread-1", runId: "other-run" });
+      subscriber.next({ type: "RUN_STARTED", threadId: "thread-1", runId: "run-1" });
+      subscriber.next({
+        type: "TEXT_MESSAGE_START",
+        role: "assistant",
+        messageId: "answer-1",
+        metadata: { cpki_event_id: "event-3" },
+      });
+      subscriber.next({ type: "RUN_FINISHED", threadId: "thread-1", runId: "run-1" });
+      subscriber.complete();
+    });
+  });
+  const seen: string[] = [];
+  const result = await adapter.reconnectRun(
+    "bot-1",
+    "thread-1",
+    "run-1",
+    "event-2",
+    async (event) => {
+      seen.push(event.type);
+      if (event.messageId) assert.equal(event.cursor, "event-3");
+    },
+  );
+  assert.equal(result.terminal, "finished");
+  assert.deepEqual(result.messageIds, ["answer-1"]);
+  assert.deepEqual(seen, ["RUN_STARTED", "TEXT_MESSAGE_START", "RUN_FINISHED"]);
+});
+
 test("OpenBot is disabled by default and cannot call a supplied transport", async () => {
   const { transport, calls } = fixture(() => Response.json({}));
   const adapter = new OpenBotAdapter({ transport, agentId: "bot-1" });

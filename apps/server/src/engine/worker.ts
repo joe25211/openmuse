@@ -11,6 +11,7 @@ export class LostLeaseError extends Error {
 }
 export interface TaskContext {
   signal: AbortSignal;
+  now(): number;
   guard(): Promise<void>;
   checkpoint(patch: Partial<AgentTask>): Promise<AgentTask>;
   event(kind: RunEvent["kind"], title: string, detail?: string): Promise<void>;
@@ -78,7 +79,9 @@ export class TaskWorker {
           !this.active.has(t.id) &&
           (t.status === "queued" ||
             (t.status === "scheduled" && Date.parse(t.nextRunAt ?? "") <= this.now()) ||
-            (t.status === "running" && Date.parse(t.leaseUntil ?? "") <= this.now()) ||
+            ((t.status === "running" || (t.kind === "openbot" && t.status === "outcome_unknown")) &&
+              (!t.nextRunAt || Date.parse(t.nextRunAt) <= this.now()) &&
+              (!t.leaseId || Date.parse(t.leaseUntil ?? "") <= this.now())) ||
             t.status === "waiting_approval"),
       );
       const eligible = [];
@@ -117,13 +120,14 @@ export class TaskWorker {
     if (this.stopping) return;
     const leaseId = randomUUID(),
       leaseMs = this.options.leaseMs ?? 60000;
+    const leaseStatus = previous.status === "outcome_unknown" ? "outcome_unknown" : "running";
     const expected: Record<string, unknown> = {
       status: previous.status,
       leaseId: previous.leaseId ?? null,
     };
     if (previous.status === "running") expected.leaseUntil = previous.leaseUntil;
     const claimed = await this.db.compareAndSwap<AgentTask>(owner, "tasks", previous.id, expected, {
-      status: "running",
+      status: leaseStatus,
       leaseId,
       leaseUntil: new Date(this.now() + leaseMs).toISOString(),
       updatedAt: new Date(this.now()).toISOString(),
@@ -139,7 +143,7 @@ export class TaskWorker {
       if (
         controller.signal.aborted ||
         latest?.leaseId !== leaseId ||
-        latest.status !== "running" ||
+        latest.status !== leaseStatus ||
         (task.delegation && latest.delegation?.runId !== task.delegation.runId)
       )
         throw new LostLeaseError();
@@ -152,7 +156,7 @@ export class TaskWorker {
         taskId,
         {
           leaseId,
-          status: "running",
+          status: leaseStatus,
           ...(task.delegation ? { delegation: { runId: task.delegation.runId } } : {}),
         },
         { ...patch, updatedAt: new Date(this.now()).toISOString() },
@@ -180,7 +184,7 @@ export class TaskWorker {
             owner,
             "tasks",
             taskId,
-            { leaseId, status: "running" },
+            { leaseId, status: leaseStatus },
             { leaseUntil: new Date(this.now() + leaseMs).toISOString() },
           )
           .then((value) => {
@@ -199,11 +203,19 @@ export class TaskWorker {
       });
       const result = await this.execute(owner, task, {
         signal: controller.signal,
+        now: () => this.now(),
         guard,
         checkpoint,
         event,
       });
-      await checkpoint({ ...result, leaseId: null, leaseUntil: null });
+      await checkpoint({
+        ...result,
+        leaseId: null,
+        leaseUntil: null,
+        ...(task.delegation && (result.status === "running" || result.status === "outcome_unknown")
+          ? { nextRunAt: new Date(this.now() + 5000).toISOString() }
+          : {}),
+      });
       await this.db.put(owner, "runs", {
         id: leaseId,
         taskId,
@@ -217,8 +229,8 @@ export class TaskWorker {
           owner,
           "tasks",
           taskId,
-          { leaseId, status: "running" },
-          { status: "queued", leaseId: null, leaseUntil: null },
+          { leaseId, status: leaseStatus },
+          { status: task.delegation ? leaseStatus : "queued", leaseId: null, leaseUntil: null },
         );
       } else {
         const detail = error instanceof Error ? error.message : "Task execution failed";
@@ -230,14 +242,17 @@ export class TaskWorker {
           owner,
           "tasks",
           taskId,
-          { leaseId, status: "running" },
+          { leaseId, status: leaseStatus },
           {
-            status: latest?.delegation?.channelAttempted ? "outcome_unknown" : "failed",
+            status: latest?.delegation?.channelAttempted ? leaseStatus : "failed",
             error: latest?.delegation?.channelAttempted
               ? "The original OpenBot attempt needs reconciliation. It was not resent."
               : detail,
             leaseId: null,
             leaseUntil: null,
+            ...(latest?.delegation?.channelAttempted
+              ? { nextRunAt: new Date(this.now() + 5000).toISOString() }
+              : {}),
             updatedAt: new Date(this.now()).toISOString(),
           },
         );

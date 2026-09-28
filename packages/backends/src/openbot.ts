@@ -99,6 +99,12 @@ const historySchema = z.object({
   messages: z.array(z.object({ id: nonempty, role: z.string(), content: z.unknown() })),
 });
 const errorSchema = z.object({ error: z.string().optional(), rule: z.string().optional() });
+export interface OpenBotRunObservation {
+  type: string;
+  cursor?: string;
+  messageId?: string;
+  terminal?: "finished" | "error";
+}
 
 export type OpenBotComputerStatus = z.infer<typeof computerStatusSchema>;
 export type OpenBotControl = z.infer<typeof controlSchema>;
@@ -206,46 +212,105 @@ export class OpenBotAdapter {
     text: string,
     onStartup: () => Promise<void>,
     signal?: AbortSignal,
-  ): Promise<{ terminal: "finished" | "error" | "unconfirmed"; messageIds: string[] }> {
+    onEvent?: (event: OpenBotRunObservation) => Promise<void>,
+  ): Promise<{
+    terminal: "finished" | "error" | "unconfirmed";
+    messageIds: string[];
+    lost?: boolean;
+  }> {
+    return this.observeText(
+      "run",
+      botId,
+      threadId,
+      runId,
+      text,
+      undefined,
+      onStartup,
+      signal,
+      onEvent,
+    );
+  }
+
+  reconnectRun(
+    botId: string,
+    threadId: string,
+    runId: string,
+    cursor: string | undefined,
+    onEvent: (event: OpenBotRunObservation) => Promise<void>,
+    signal?: AbortSignal,
+  ) {
+    return this.observeText(
+      "connect",
+      botId,
+      threadId,
+      runId,
+      "",
+      cursor,
+      undefined,
+      signal,
+      onEvent,
+    );
+  }
+
+  private async observeText(
+    mode: "run" | "connect",
+    botId: string,
+    threadId: string,
+    runId: string,
+    text: string,
+    cursor?: string,
+    onStartup?: () => Promise<void>,
+    signal?: AbortSignal,
+    onEvent?: (event: OpenBotRunObservation) => Promise<void>,
+  ): Promise<{
+    terminal: "finished" | "error" | "unconfirmed";
+    messageIds: string[];
+    lost?: boolean;
+  }> {
     const transport = this.requireTransport();
     if (!transport.socketUrl)
       throw new OpenBotError("not_configured", "OpenBot realtime is unavailable.");
     const id = identifier(botId);
-    const agent = new IntelligenceAgent({
-      url: transport.socketUrl,
-      runtimeUrl: transport.runtimeUrl,
-      agentId: id,
-      fetch: async (url, init) => {
-        const target = new URL(String(url));
-        const response = await transport.request(target.pathname + target.search, init);
-        if (target.pathname.endsWith("/run") && response.ok) {
-          const started = z.object({ threadId: nonempty, runId: nonempty }).safeParse(
-            await response
-              .clone()
-              .json()
-              .catch(() => undefined),
-          );
-          if (
-            !started.success ||
-            started.data.threadId !== threadId ||
-            started.data.runId !== runId
-          )
-            throw new OpenBotError(
-              "invalid_response",
-              "OpenBot acknowledged a different run.",
-              undefined,
-              undefined,
-              true,
+    const agent = new IntelligenceAgent(
+      {
+        url: transport.socketUrl,
+        runtimeUrl: transport.runtimeUrl,
+        agentId: id,
+        fetch: async (url, init) => {
+          const target = new URL(String(url));
+          const response = await transport.request(target.pathname + target.search, init);
+          if (target.pathname.endsWith(`/${mode}`) && response.ok && response.status !== 204) {
+            const started = z.object({ threadId: nonempty, runId: nonempty.optional() }).safeParse(
+              await response
+                .clone()
+                .json()
+                .catch(() => undefined),
             );
-          await onStartup();
-        }
-        return response;
+            if (
+              !started.success ||
+              started.data.threadId !== threadId ||
+              (mode === "run"
+                ? started.data.runId !== runId
+                : started.data.runId !== undefined && started.data.runId !== runId)
+            )
+              throw new OpenBotError(
+                "invalid_response",
+                "OpenBot acknowledged a different run.",
+                undefined,
+                undefined,
+                true,
+              );
+            await onStartup?.();
+          }
+          return response;
+        },
       },
-    });
+      { lastSeenEventIds: new Map(cursor ? [[threadId, cursor]] : []) },
+    );
     const input: RunAgentInput = {
       threadId,
       runId,
-      messages: [{ id: randomUUID(), role: "user", content: text }],
+      messages: mode === "run" ? [{ id: randomUUID(), role: "user", content: text }] : [],
       state: {},
       tools: [],
       context: [],
@@ -253,20 +318,26 @@ export class OpenBotAdapter {
     };
     return new Promise((resolve, reject) => {
       let settled = false;
-      let started = false;
+      let started = mode === "connect";
       const messageIds: string[] = [];
       let subscription: Subscription | undefined;
-      const finish = (result: "finished" | "error" | "unconfirmed") => {
+      let pending = Promise.resolve();
+      const finish = (result: "finished" | "error" | "unconfirmed", lost = false) => {
         if (settled) return;
         settled = true;
         subscription?.unsubscribe();
-        resolve({ terminal: result, messageIds });
+        clearTimeout(timeout);
+        void pending.then(
+          () => resolve({ terminal: result, messageIds, ...(lost ? { lost } : {}) }),
+          reject,
+        );
       };
-      subscription = agent.run(input).subscribe({
+      // An observation window may end; the remote run has no execution deadline.
+      const timeout = setTimeout(() => finish("unconfirmed"), 15000);
+      subscription = agent[mode === "run" ? "run" : "connect"](input).subscribe({
         next: (event) => {
           if (event.type === "RUN_STARTED") {
             started = event.threadId === threadId && event.runId === runId;
-            return;
           }
           if (
             event.type === "TEXT_MESSAGE_START" &&
@@ -274,18 +345,57 @@ export class OpenBotAdapter {
             event.role === "assistant" &&
             typeof event.messageId === "string"
           ) {
-            messageIds.push(event.messageId);
-            return;
+            !messageIds.includes(event.messageId) && messageIds.push(event.messageId);
           }
-          if (event.type !== "RUN_FINISHED" && event.type !== "RUN_ERROR") return;
-          if (event.threadId !== threadId || event.runId !== runId) return;
-          finish(event.type === "RUN_FINISHED" ? "finished" : "error");
+          const terminal = event.type === "RUN_FINISHED" || event.type === "RUN_ERROR";
+          if (terminal && (event.threadId !== threadId || event.runId !== runId)) return;
+          if (!started && !terminal) return;
+          if (
+            !terminal &&
+            ![
+              "RUN_STARTED",
+              "TEXT_MESSAGE_START",
+              "TEXT_MESSAGE_END",
+              "TOOL_CALL_START",
+              "TOOL_CALL_END",
+            ].includes(event.type)
+          )
+            return;
+          const metadata = "metadata" in event ? event.metadata : undefined;
+          const cursor =
+            metadata && typeof metadata === "object" && "cpki_event_id" in metadata
+              ? metadata.cpki_event_id
+              : undefined;
+          if (onEvent)
+            pending = pending.then(() =>
+              onEvent({
+                type: event.type,
+                ...(typeof cursor === "string" && cursor && !cursor.startsWith("cpki_ingested")
+                  ? { cursor }
+                  : {}),
+                ...(event.type === "TEXT_MESSAGE_START" &&
+                "messageId" in event &&
+                typeof event.messageId === "string"
+                  ? { messageId: event.messageId }
+                  : {}),
+                ...(terminal
+                  ? {
+                      terminal:
+                        event.type === "RUN_FINISHED" ? ("finished" as const) : ("error" as const),
+                    }
+                  : {}),
+              }),
+            );
+          void pending.catch((error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            subscription?.unsubscribe();
+            reject(error);
+          });
+          if (terminal) finish(event.type === "RUN_FINISHED" ? "finished" : "error");
         },
-        error: (error) => {
-          if (settled) return;
-          settled = true;
-          reject(error);
-        },
+        error: () => finish("unconfirmed", true),
         complete: () => finish("unconfirmed"),
       });
       if (settled) subscription.unsubscribe();

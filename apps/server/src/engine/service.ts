@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { CopilotKitIntelligence } from "@copilotkit/runtime/v2";
 import { z } from "zod";
+import type { OpenBotRunObservation } from "../../../../packages/backends/src/openbot.ts";
 import {
   type AgentArtifact,
   type AgentIdentity,
@@ -981,72 +982,126 @@ export class AgentService {
     const gateway = this.openbot;
     if (!gateway || !task.delegation) throw new Error("OpenBot is unavailable");
     let delegation = task.delegation;
+    const now = () => new Date(context.now()).toISOString();
     const save = async (patch: Partial<TaskDelegation>) => {
       const next = await context.checkpoint({ delegation: { ...delegation, ...patch } });
       if (!next.delegation) throw new LostLeaseError();
       delegation = next.delegation;
     };
-    const unknown = (detail: string): Partial<AgentTask> => ({
-      status: "outcome_unknown",
-      error: detail,
-      delegation,
-    });
-    if (delegation.channelAttempted || delegation.submissionAttempted)
-      return unknown(
-        "The original OpenBot attempt needs reconciliation before any further action.",
-      );
-    await gateway.eligibleBot(delegation.botId);
-    await save({ channelAttempted: true });
-    let channel: { channelId: string; threadId: string };
-    try {
-      channel = await gateway.createTaskChannel(delegation.botId);
-    } catch {
-      return unknown("OpenBot channel creation was not confirmed. Check the original attempt.");
-    }
-    await save({ channelId: channel.channelId, threadId: channel.threadId });
-    try {
+    const pending = async (lost: boolean): Promise<Partial<AgentTask>> => {
+      if (lost && !delegation.transportLostAt) await save({ transportLostAt: now() });
+      if (
+        delegation.transportLostAt &&
+        context.now() - Date.parse(delegation.transportLostAt) >= 5 * 60_000
+      )
+        return {
+          status: "outcome_unknown",
+          error: "The original OpenBot run could not be recovered yet. Reconciliation continues.",
+          delegation,
+        };
+      if (
+        !delegation.transportLostAt &&
+        context.now() - Date.parse(delegation.lastProgressAt ?? task.createdAt) >= 10 * 60_000 &&
+        !delegation.delayedAt
+      )
+        await save({ delayedAt: now() });
+      if (delegation.transportLostAt && task.status === "outcome_unknown")
+        return { status: "outcome_unknown", delegation };
+      return { status: "running", error: null, delegation };
+    };
+    const observe = async (event: OpenBotRunObservation) => {
+      if (delegation.terminal || (event.cursor && event.cursor === delegation.replayCursor)) return;
+      await save({
+        lastProgressAt: now(),
+        lastProgress: event.type,
+        transportLostAt: undefined,
+        delayedAt: undefined,
+        ...(event.cursor ? { replayCursor: event.cursor } : {}),
+        ...(event.messageId
+          ? { messageIds: [...new Set([...(delegation.messageIds ?? []), event.messageId])] }
+          : {}),
+        ...(event.terminal ? { terminal: event.terminal } : {}),
+      });
+    };
+    if (!delegation.channelAttempted) {
       await gateway.eligibleBot(delegation.botId);
-    } catch {
-      return {
-        status: "failed",
-        error: "The named Bot is no longer eligible for a text-only task",
-        delegation,
-      };
+      await save({ channelAttempted: true });
+      try {
+        const channel = await gateway.createTaskChannel(delegation.botId);
+        await save({ channelId: channel.channelId, threadId: channel.threadId });
+      } catch (error) {
+        if (error instanceof LostLeaseError) throw error;
+        return pending(true);
+      }
     }
-    await save({ submissionAttempted: true });
-    let run: Awaited<ReturnType<OpenBotGateway["runText"]>>;
-    try {
-      run = await gateway.runText(
-        delegation.botId,
-        channel.threadId,
-        delegation.runId,
-        delegation.sentContext,
-        () => save({ startupAcknowledged: true }),
-        context.signal,
-      );
-    } catch {
-      return unknown(
-        "OpenBot submission or realtime outcome was not confirmed. Check the original run.",
-      );
+    if (!delegation.threadId) return pending(true);
+    if (!delegation.submissionAttempted) {
+      try {
+        await gateway.eligibleBot(delegation.botId);
+      } catch {
+        return {
+          status: "failed",
+          error: "The named Bot is no longer eligible for a text-only task",
+          delegation,
+        };
+      }
+      await save({ submissionAttempted: true, lastProgressAt: now() });
+      try {
+        const run = await gateway.runText(
+          delegation.botId,
+          delegation.threadId,
+          delegation.runId,
+          delegation.sentContext,
+          () => save({ startupAcknowledged: true, lastProgressAt: now() }),
+          context.signal,
+          observe,
+        );
+        if (run.terminal !== "unconfirmed" && !delegation.terminal)
+          await save({ terminal: run.terminal, messageIds: run.messageIds });
+        if (run.lost) return pending(true);
+      } catch (error) {
+        if (error instanceof LostLeaseError) throw error;
+        return pending(true);
+      }
+    } else if (!delegation.terminal) {
+      try {
+        const run = await gateway.reconnectRun(
+          delegation.botId,
+          delegation.threadId,
+          delegation.runId,
+          delegation.replayCursor,
+          observe,
+          context.signal,
+        );
+        if (run.terminal !== "unconfirmed" && !delegation.terminal)
+          await save({ terminal: run.terminal, messageIds: run.messageIds });
+        if (run.lost) return pending(true);
+      } catch (error) {
+        if (error instanceof LostLeaseError) throw error;
+        return pending(true);
+      }
     }
-    if (run.terminal === "unconfirmed")
-      return unknown("OpenBot did not provide a matching terminal event.");
-    await save({ terminal: run.terminal, messageIds: run.messageIds });
-    if (run.terminal === "error")
+    if (!delegation.terminal) return pending(false);
+    if (delegation.terminal === "error")
       return { status: "failed", error: "The linked OpenBot run reported an error", delegation };
     try {
-      const output = await gateway.textResult(delegation.botId, channel.threadId, run.messageIds);
+      const output = await gateway.textResult(
+        delegation.botId,
+        delegation.threadId,
+        delegation.messageIds ?? [],
+      );
       if (!output)
         return {
           status: "failed",
           error: "The linked OpenBot run finished without a usable answer",
           delegation,
         };
-      delegation = { ...delegation, output };
+      await save({ output });
       await context.event("result", "Bot answered", output);
-      return { status: "succeeded", result: output, delegation };
-    } catch {
-      return unknown("The linked OpenBot run finished, but its answer could not be saved.");
+      return { status: "succeeded", result: output, error: null, delegation };
+    } catch (error) {
+      if (error instanceof LostLeaseError) throw error;
+      return pending(true);
     }
   }
   async finish(task: AgentTask, context: TaskContext, result: string) {
@@ -1097,7 +1152,15 @@ export class AgentService {
         "Task needs attention",
         task.error ?? task.title,
         task.id,
-        `task-error:${task.id}:${task.attempts}`,
+        task.delegation ? `task-error:${task.id}` : `task-error:${task.id}:${task.attempts}`,
+      );
+    } else if (task.status === "outcome_unknown" && task.delegation) {
+      await this.notify(
+        owner,
+        "Outcome unknown",
+        "The original Bot run could not be verified yet. OpenMuse is still checking it.",
+        task.id,
+        `task-unknown:${task.id}`,
       );
     } else if (task.status === "waiting_input") {
       await this.notify(

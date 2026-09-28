@@ -23,6 +23,11 @@ export interface TaskDelegation {
   threadId?: string;
   submissionAttempted: boolean;
   startupAcknowledged?: boolean;
+  lastProgressAt?: string;
+  lastProgress?: string;
+  replayCursor?: string;
+  transportLostAt?: string;
+  delayedAt?: string;
   terminal?: "finished" | "error";
   messageIds?: string[];
   output?: string;

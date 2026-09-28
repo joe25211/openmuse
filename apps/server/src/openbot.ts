@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { OpenBotAdapter, OpenBotError } from "../../../packages/backends/src/openbot.ts";
+import {
+  OpenBotAdapter,
+  OpenBotError,
+  type OpenBotRunObservation,
+} from "../../../packages/backends/src/openbot.ts";
 import type { Config } from "./config.ts";
 import { AppError } from "./errors.ts";
 
@@ -108,8 +112,20 @@ export class OpenBotGateway {
     text: string,
     onStartup: () => Promise<void>,
     signal: AbortSignal,
+    onEvent?: (event: OpenBotRunObservation) => Promise<void>,
   ) {
-    return this.adapter.runText(botId, threadId, runId, text, onStartup, signal);
+    return this.adapter.runText(botId, threadId, runId, text, onStartup, signal, onEvent);
+  }
+
+  reconnectRun(
+    botId: string,
+    threadId: string,
+    runId: string,
+    cursor: string | undefined,
+    onEvent: (event: OpenBotRunObservation) => Promise<void>,
+    signal: AbortSignal,
+  ) {
+    return this.adapter.reconnectRun(botId, threadId, runId, cursor, onEvent, signal);
   }
 
   textResult(botId: string, threadId: string, messageIds: string[]) {

@@ -35,7 +35,7 @@ async function fixture() {
   await once(bot, "listening");
   const address = bot.address();
   assert(address && typeof address !== "string");
-  const db = await createStore({ dataDir: join(directory, "db") });
+  let db = await createStore({ dataDir: join(directory, "db") });
   const config: Config = {
     mode: "sample",
     port: 8787,
@@ -49,7 +49,7 @@ async function fixture() {
     openbotEnabled: true,
     openbotBaseUrl: `http://127.0.0.1:${address.port}`,
   };
-  const server = await createApp(db, config);
+  let server = await createApp(db, config);
   const session = await server.app.request("/api/session", {
     method: "POST",
     body: "{}",
@@ -68,8 +68,12 @@ async function fixture() {
       body: JSON.stringify(body),
     });
   return {
-    server,
-    db,
+    get server() {
+      return server;
+    },
+    get db() {
+      return db;
+    },
     owner,
     token,
     request,
@@ -78,6 +82,12 @@ async function fixture() {
     },
     get channelCalls() {
       return channelCalls;
+    },
+    async restart() {
+      await server.agent.stop();
+      await db.close();
+      db = await createStore({ dataDir: join(directory, "db") });
+      server = await createApp(db, config);
     },
     async close() {
       await server.agent.stop();
@@ -252,13 +262,29 @@ test("overprivileged Bot is refused and uncertain submission is never resent", a
     const run = t.mock.method(gateway, "runText", async () => {
       throw new Error("lost response");
     });
+    t.mock.method(gateway, "reconnectRun", async () => ({
+      terminal: "unconfirmed" as const,
+      messageIds: [],
+      lost: true,
+    }));
     await f.server.agent.worker.tick();
     await f.server.agent.worker.tick();
     assert.equal(run.mock.callCount(), 1);
     assert.equal(f.channelCalls, 1);
     const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
-    assert.equal(saved?.status, "outcome_unknown");
+    assert.equal(saved?.status, "running");
     assert.equal(saved.delegation?.submissionAttempted, true);
+    let clock = Date.now();
+    t.mock.method(Date, "now", () => clock);
+    clock += 5 * 60_000 + 5000;
+    await f.server.agent.worker.tick();
+    assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.status, "outcome_unknown");
+    assert.equal(
+      (await f.db.list<{ title: string }>(f.owner, "notifications")).filter(
+        (n) => n.title === "Outcome unknown",
+      ).length,
+      1,
+    );
     assert.equal(
       (
         await f.server.app.request(`/api/agent/tasks/${task.id}/control`, {
@@ -268,6 +294,23 @@ test("overprivileged Bot is refused and uncertain submission is never resent", a
         })
       ).status,
       409,
+    );
+    t.mock.method(gateway, "reconnectRun", async () => ({
+      terminal: "finished" as const,
+      messageIds: ["late-answer"],
+    }));
+    t.mock.method(gateway, "textResult", async () => "Late verified answer.");
+    clock += 6000;
+    await f.server.agent.worker.tick();
+    const recovered = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(recovered?.status, "succeeded");
+    assert.equal(recovered.error, null);
+    assert.equal(run.mock.callCount(), 1);
+    assert.equal(
+      (await f.db.list<{ title: string }>(f.owner, "notifications")).filter(
+        (n) => n.title === "Answer in plain text",
+      ).length,
+      1,
     );
   } finally {
     await f.close();
@@ -299,6 +342,146 @@ test("confirmed error and empty answer do not complete a delegated task", async 
       assert.equal(saved.result, undefined);
       assert.equal(saved.delegation?.terminal, requestId === "error" ? "error" : "finished");
     }
+  } finally {
+    await f.close();
+  }
+});
+
+test("restart recovers the saved run and output without another submission", async (t) => {
+  const f = await fixture();
+  try {
+    let clock = Date.now();
+    t.mock.method(Date, "now", () => clock);
+    const response = await f.request("conversation-1", {
+      requestId: "restart",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    const first = f.server.agent.openbot;
+    assert(first);
+    const firstRun = t.mock.method(
+      first,
+      "runText",
+      async (
+        _bot: string,
+        _thread: string,
+        _run: string,
+        _text: string,
+        onStartup: () => Promise<void>,
+        _signal: AbortSignal,
+        onEvent: (event: { type: string; cursor?: string; messageId?: string }) => Promise<void>,
+      ) => {
+        await onStartup();
+        await onEvent({ type: "RUN_STARTED", cursor: "event-1" });
+        await onEvent({ type: "TEXT_MESSAGE_START", cursor: "event-2", messageId: "answer-1" });
+        return { terminal: "unconfirmed" as const, messageIds: ["answer-1"], lost: true };
+      },
+    );
+    await f.server.agent.worker.tick();
+    assert.equal(firstRun.mock.callCount(), 1);
+    const interrupted = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(interrupted?.status, "running");
+    assert.equal(interrupted.delegation?.replayCursor, "event-2");
+    assert.deepEqual(interrupted.delegation?.messageIds, ["answer-1"]);
+    await f.db.compareAndSwap(
+      f.owner,
+      "tasks",
+      task.id,
+      { status: "running" },
+      {
+        leaseId: "expired-worker",
+        leaseUntil: new Date(clock - 1000).toISOString(),
+      },
+    );
+    await f.restart();
+    const second = f.server.agent.openbot;
+    assert(second);
+    const repeated = t.mock.method(second, "runText", async () => {
+      throw new Error("second submission");
+    });
+    const connect = t.mock.method(
+      second,
+      "reconnectRun",
+      async (
+        _bot: string,
+        threadId: string,
+        runId: string,
+        cursor: string | undefined,
+        onEvent: (event: {
+          type: string;
+          cursor?: string;
+          terminal?: "finished" | "error";
+        }) => Promise<void>,
+      ) => {
+        assert.equal(threadId, interrupted.delegation?.threadId);
+        assert.equal(runId, interrupted.delegation?.runId);
+        assert.equal(cursor, "event-2");
+        await onEvent({ type: "TEXT_MESSAGE_START", cursor: "event-2" });
+        await onEvent({ type: "RUN_FINISHED", cursor: "event-3", terminal: "finished" });
+        await onEvent({ type: "RUN_ERROR", cursor: "event-4", terminal: "error" });
+        return { terminal: "finished" as const, messageIds: [] };
+      },
+    );
+    t.mock.method(second, "textResult", async () => "Recovered answer.");
+    clock += 6000;
+    await f.server.agent.worker.tick();
+    const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(saved?.status, "succeeded");
+    assert.equal(saved.result, "Recovered answer.");
+    assert.equal(saved.delegation?.output, "Recovered answer.");
+    assert.equal(firstRun.mock.callCount(), 1);
+    assert.equal(repeated.mock.callCount(), 0);
+    assert.equal(connect.mock.callCount(), 1);
+    assert.equal(f.channelCalls, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("healthy silence delays at ten minutes and late verified completion notices once", async (t) => {
+  const f = await fixture();
+  try {
+    let clock = Date.now();
+    t.mock.method(Date, "now", () => clock);
+    const response = await f.request("conversation-1", {
+      requestId: "delayed",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    t.mock.method(gateway, "runText", async () => ({
+      terminal: "unconfirmed" as const,
+      messageIds: [],
+    }));
+    t.mock.method(gateway, "reconnectRun", async () => ({
+      terminal: "unconfirmed" as const,
+      messageIds: [],
+    }));
+    await f.server.agent.worker.tick();
+    clock += 10 * 60_000 + 5000;
+    await f.server.agent.worker.tick();
+    const delayed = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(delayed?.status, "running");
+    assert(delayed.delegation?.delayedAt);
+    const finish = t.mock.method(gateway, "reconnectRun", async () => ({
+      terminal: "finished" as const,
+      messageIds: ["answer-1"],
+    }));
+    t.mock.method(gateway, "textResult", async () => "Late answer.");
+    clock += 6000;
+    await f.server.agent.worker.tick();
+    await f.server.agent.worker.tick();
+    assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.result, "Late answer.");
+    assert.equal(finish.mock.callCount(), 1);
+    assert.equal(
+      (await f.db.list<{ title: string }>(f.owner, "notifications")).filter(
+        (n) => n.title === "One answer",
+      ).length,
+      1,
+    );
   } finally {
     await f.close();
   }
