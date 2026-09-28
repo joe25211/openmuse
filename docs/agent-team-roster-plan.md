@@ -30,7 +30,7 @@ A2UI is a JSON protocol for agent-described UI rendered from an application-owne
 
 ## Recommended next slice
 
-After the user resolves the decisions below, implement one-off teams only: request a team, propose a bounded roster, show the structured review card, require approval, then start a parent AgentTask with the approved roster snapshot and per-member progress. Preserve the single-Bot path unchanged. Defer saved ongoing templates, dynamic roster generation, member substitution, and multi-agent coordination policies until the one-off flow demonstrates demand. Do not begin implementation from this plan alone; team execution remains outside the approved single-Bot release ([implementation plan](https://github.com/joe25211/openmuse/issues/1)).
+After the user resolves the decisions below, implement one-off teams only: request a team, propose a bounded roster, show the structured review card, require approval, then start a parent AgentTask with the approved roster snapshot and per-member progress. Preserve the single-Bot path unchanged. Defer saved ongoing templates, dynamic roster generation, member substitution, and multi-agent coordination policies until the one-off flow demonstrates demand. Do not begin implementation from this plan alone; team execution remains outside the approved single-Bot implementation scope ([issue #12](https://github.com/joe25211/openmuse/issues/12)).
 
 ## Decisions still needed from the user
 
