@@ -19,6 +19,7 @@ import {
   View,
 } from "react-native";
 import { z } from "zod";
+import type { AgentTask, RunEvent } from "../../../packages/domain/src/agent";
 import { ArtifactCard } from "./agent-ui";
 import { useAgentWorkspace } from "./agent-workspace";
 import { AssistantResponse } from "./assistant-response";
@@ -27,6 +28,11 @@ import { BrowserRunContext, BrowserToolCard } from "./browser-tool-card";
 import { BrowserThreadCard } from "./computer";
 import { ConversationQueue, type QueuedMessage } from "./conversation-queue";
 import { runConversationTurn } from "./conversation-run";
+import {
+  type DelegatedPane,
+  delegatedTaskStatus,
+  paneAfterHorizontalGesture,
+} from "./delegated-chat";
 import { MailToolCard } from "./mail-tool-card";
 import { FileThreadCard, TaskThreadCard } from "./thread-artifacts";
 import { type Selection, useMuseThread } from "./threads";
@@ -208,6 +214,79 @@ export function ChatScreen({
   const [saveError, setSaveError] = useState("");
   const [historyError, setHistoryError] = useState("");
   const [historyAttempt, setHistoryAttempt] = useState(0);
+  const [delegatedPane, setDelegatedPane] = useState<DelegatedPane>("chat");
+  const [showSentContext, setShowSentContext] = useState(false);
+  const stage = useRef<View>(null);
+  const gestureStart = useRef<{ x: number; y: number; at: number } | null>(null);
+  const delegatedTask = [...(agentWorkspace?.tasks || [])]
+    .filter((task) => task.delegation?.conversationId === selection.id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  useEffect(() => {
+    setDelegatedPane("chat");
+    setShowSentContext(false);
+  }, [delegatedTask?.id]);
+  useEffect(() => {
+    if (Platform.OS !== "web" || !delegatedTask) return;
+    const node = stage.current as unknown as HTMLElement | null;
+    if (!node) return;
+    let dragStart: { x: number; y: number } | undefined;
+    let wheelX = 0;
+    let wheelTimer: ReturnType<typeof setTimeout> | undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (
+        event.button !== 0 ||
+        (event.target as HTMLElement).closest("button, a, input, textarea, select") ||
+        getSelection()?.toString()
+      )
+        return;
+      dragStart = { x: event.clientX, y: event.clientY };
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (!dragStart) return;
+      const start = dragStart;
+      dragStart = undefined;
+      if (getSelection()?.toString()) return;
+      setDelegatedPane((current) =>
+        paneAfterHorizontalGesture(event.clientX - start.x, event.clientY - start.y, current),
+      );
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (
+        Math.abs(event.deltaX) <= Math.abs(event.deltaY) ||
+        (event.target as HTMLElement).closest("input, textarea, [contenteditable=true]")
+      )
+        return;
+      wheelX += event.deltaX;
+      if (Math.abs(wheelX) >= 48) {
+        event.preventDefault();
+        setDelegatedPane((current) => paneAfterHorizontalGesture(wheelX, 0, current));
+        wheelX = 0;
+      }
+      if (wheelTimer) clearTimeout(wheelTimer);
+      wheelTimer = setTimeout(() => {
+        wheelX = 0;
+      }, 180);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.target || !(event.target as HTMLElement).matches('[role="tab"]')) return;
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const next: DelegatedPane = event.key === "ArrowLeft" ? "chat" : "task";
+      setDelegatedPane(next);
+      node.querySelectorAll<HTMLElement>('[role="tab"]')[next === "chat" ? 0 : 1]?.focus();
+    };
+    node.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("pointerup", onPointerUp);
+    node.addEventListener("wheel", onWheel, { passive: false });
+    node.addEventListener("keydown", onKeyDown);
+    return () => {
+      node.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("pointerup", onPointerUp);
+      node.removeEventListener("wheel", onWheel);
+      node.removeEventListener("keydown", onKeyDown);
+      if (wheelTimer) clearTimeout(wheelTimer);
+    };
+  }, [delegatedTask]);
   useEffect(() => {
     if (!isReady) return;
     let active = true;
@@ -348,9 +427,72 @@ export function ChatScreen({
   const visible = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const replying = busy || agent.isRunning;
   return (
-    <View style={{ flex: 1 }}>
+    <View
+      ref={stage}
+      style={{ flex: 1 }}
+      onTouchStart={(event) => {
+        if (delegatedTask && event.nativeEvent.touches.length === 1) {
+          const touch = event.nativeEvent.touches[0];
+          gestureStart.current = { x: touch.pageX, y: touch.pageY, at: Date.now() };
+        }
+      }}
+      onTouchEnd={(event) => {
+        const start = gestureStart.current;
+        gestureStart.current = null;
+        if (
+          start &&
+          Date.now() - start.at < 500 &&
+          delegatedTask &&
+          event.nativeEvent.changedTouches.length
+        ) {
+          const touch = event.nativeEvent.changedTouches[0];
+          setDelegatedPane((current) =>
+            paneAfterHorizontalGesture(touch.pageX - start.x, touch.pageY - start.y, current),
+          );
+        }
+      }}
+      onTouchCancel={() => {
+        gestureStart.current = null;
+      }}
+    >
+      {delegatedTask && (
+        <View style={{ gap: 9, paddingTop: 8, paddingBottom: 10 }}>
+          <View style={{ gap: 3 }}>
+            <Text style={s.small}>Bot · {delegatedTask.delegation?.botName}</Text>
+            <Text accessibilityLiveRegion="polite" style={s.heading}>
+              {delegatedTaskStatus(delegatedTask)}
+            </Text>
+          </View>
+          <View
+            accessibilityRole="tablist"
+            style={[s.row, { gap: 6, padding: 4, backgroundColor: colors.card, borderRadius: 18 }]}
+          >
+            {(["chat", "task"] as const).map((pane) => (
+              <Pressable
+                key={pane}
+                accessibilityRole="tab"
+                accessibilityLabel={pane === "chat" ? "Chat" : "Task activity"}
+                accessibilityState={{ selected: delegatedPane === pane }}
+                onPress={() => setDelegatedPane(pane)}
+                style={{
+                  flex: 1,
+                  alignItems: "center",
+                  paddingVertical: 9,
+                  borderRadius: 14,
+                  backgroundColor: delegatedPane === pane ? colors.line : "transparent",
+                }}
+              >
+                <Text style={[s.text, { fontWeight: delegatedPane === pane ? "600" : "400" }]}>
+                  {pane === "chat" ? "Chat" : "Task"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      )}
       <ScrollView
         ref={list}
+        style={{ display: delegatedTask && delegatedPane === "task" ? "none" : "flex" }}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ gap: 13, paddingTop: 15, paddingBottom: 20, flexGrow: 1 }}
         onScroll={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
@@ -564,8 +706,25 @@ export function ChatScreen({
             Retry response
           </Button>
         )}
+        {delegatedTask && (
+          <DelegatedHandoff
+            task={delegatedTask}
+            showContext={showSentContext}
+            onToggleContext={() => setShowSentContext((shown) => !shown)}
+          />
+        )}
       </ScrollView>
-      {awayFromLatest && (
+      {delegatedTask && (
+        <ScrollView
+          style={{ display: delegatedPane === "task" ? "flex" : "none" }}
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ gap: 13, paddingTop: 15, paddingBottom: 20 }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <DelegatedTaskPane task={delegatedTask} />
+        </ScrollView>
+      )}
+      {delegatedPane === "chat" && awayFromLatest && (
         <Button
           small
           icon={ArrowDown}
@@ -804,4 +963,162 @@ export function ChatScreen({
       </KeyboardAvoidingView>
     </View>
   );
+}
+
+function DelegatedHandoff({
+  task,
+  showContext,
+  onToggleContext,
+}: {
+  task: AgentTask;
+  showContext: boolean;
+  onToggleContext: () => void;
+}) {
+  const { open } = useWorkspace();
+  const status = delegatedTaskStatus(task);
+  const result = task.delegation?.output ?? task.result;
+  const preview = result?.replace(/\s+/g, " ").slice(0, 240);
+  const notice =
+    task.status === "outcome_unknown"
+      ? `OpenMuse cannot confirm whether ${task.delegation?.botName} finished.`
+      : task.status === "failed"
+        ? `${task.delegation?.botName} reported a failure.`
+        : task.status === "waiting_input"
+          ? `${task.delegation?.botName} needs your input: ${task.question || "Open the task to continue."}`
+          : task.status === "succeeded"
+            ? `${task.delegation?.botName} finished. The saved result is in Task.`
+            : `${task.delegation?.botName} is working on this task.`;
+  return (
+    <Card style={{ gap: 9, marginTop: 5 }}>
+      <View style={[s.row, { justifyContent: "space-between", gap: 8 }]}>
+        <Text style={s.heading}>Task update</Text>
+        <Text accessibilityLiveRegion="polite" style={s.small}>
+          {status}
+        </Text>
+      </View>
+      <Text style={s.muted}>{notice}</Text>
+      {task.status === "succeeded" && preview && <AssistantResponse content={preview} />}
+      {!!sourcePath(task) && (
+        <Text selectable style={s.small}>
+          Named resource reference: {sourcePath(task)}
+        </Text>
+      )}
+      <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
+        <Button small onPress={() => open({ type: "task", taskId: task.id })}>
+          {task.status === "waiting_input" ? "Answer task question" : "Open task"}
+        </Button>
+        <Button small onPress={onToggleContext}>
+          {showContext ? "Hide sent context" : "View sent context"}
+        </Button>
+      </View>
+      {showContext && (
+        <View style={{ borderTopWidth: 1, borderTopColor: colors.line, paddingTop: 9 }}>
+          <Text style={s.small}>Exact context sent to {task.delegation?.botName}</Text>
+          <AssistantResponse content={task.delegation?.sentContext || task.prompt} />
+        </View>
+      )}
+    </Card>
+  );
+}
+
+function DelegatedTaskPane({ task }: { task: AgentTask }) {
+  const { api, open } = useWorkspace();
+  const [detail, setDetail] = useState<{ task: AgentTask; events: RunEvent[] }>();
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    void api
+      .request<{ task: AgentTask; events: RunEvent[] }>(`/api/agent/tasks/${task.id}`)
+      .then((result) => {
+        if (active) {
+          setDetail(result);
+          setError("");
+        }
+      })
+      .catch((e) => {
+        if (active) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      active = false;
+    };
+  }, [api, task.id, task.updatedAt]);
+  const savedTask = detail?.task ?? task;
+  const result = savedTask.delegation?.output ?? savedTask.result;
+  return (
+    <View style={{ gap: 14 }}>
+      <Card style={{ gap: 10 }}>
+        <Text style={s.small}>OpenMuse task · {savedTask.delegation?.botName}</Text>
+        <Text style={s.heading}>{savedTask.title}</Text>
+        <Text accessibilityLiveRegion="polite" style={s.text}>
+          {delegatedTaskStatus(savedTask)}
+        </Text>
+        {savedTask.status === "waiting_input" && savedTask.question && (
+          <Text style={s.muted}>{savedTask.question}</Text>
+        )}
+        {savedTask.status === "failed" && savedTask.error && (
+          <ErrorNotice error={savedTask.error} />
+        )}
+        {savedTask.status === "outcome_unknown" && (
+          <Text style={s.muted}>
+            OpenMuse has not verified whether the Bot finished. This task is still being reconciled.
+          </Text>
+        )}
+        <Button small onPress={() => open({ type: "task", taskId: savedTask.id })}>
+          {savedTask.status === "waiting_input"
+            ? "Answer task question"
+            : savedTask.status === "waiting_approval"
+              ? "Review task"
+              : "Open task details"}
+        </Button>
+      </Card>
+      <Card style={{ gap: 8 }}>
+        <Text style={s.heading}>Exact context sent</Text>
+        <AssistantResponse content={savedTask.delegation?.sentContext || savedTask.prompt} />
+        {!!sourcePath(savedTask) && (
+          <Text selectable style={s.small}>
+            Named resource reference: {sourcePath(savedTask)}
+          </Text>
+        )}
+      </Card>
+      <Card style={{ gap: 10 }}>
+        <Text style={s.heading}>Activity</Text>
+        {detail?.events.length ? (
+          detail.events.map((event) => (
+            <View
+              key={event.id}
+              style={{ borderLeftWidth: 2, borderLeftColor: colors.line, paddingLeft: 10, gap: 3 }}
+            >
+              <Text style={s.text}>{event.title}</Text>
+              {!!event.detail && (
+                <Text selectable style={s.muted}>
+                  {event.detail}
+                </Text>
+              )}
+              <Text style={s.small}>{new Date(event.date).toLocaleString()}</Text>
+            </View>
+          ))
+        ) : (
+          <Text style={s.muted}>Task activity will appear here as it is saved.</Text>
+        )}
+        <ErrorNotice error={error} />
+      </Card>
+      {!!result && (
+        <Card style={{ backgroundColor: colors.green, gap: 8 }}>
+          <Text style={s.heading}>Saved result</Text>
+          <AssistantResponse content={result} />
+        </Card>
+      )}
+      {!!savedTask.error && savedTask.status !== "failed" && (
+        <ErrorNotice error={savedTask.error} />
+      )}
+      <TaskThreadCard task={savedTask} />
+    </View>
+  );
+}
+
+function sourcePath(task: AgentTask) {
+  const delegation = task.delegation;
+  return delegation && "sourcePath" in delegation && typeof delegation.sourcePath === "string"
+    ? delegation.sourcePath
+    : undefined;
 }
