@@ -8,8 +8,8 @@ import { EventSchemas, EventType, type RunAgentInput } from "@ag-ui/core";
 import { lastValueFrom, toArray } from "rxjs";
 import { createApp } from "../apps/server/src/app.ts";
 import type { Config } from "../apps/server/src/config.ts";
-import { ConversationAgent } from "../apps/server/src/engine/conversation.ts";
 import { createStore } from "../apps/server/src/db.ts";
+import { ConversationAgent } from "../apps/server/src/engine/conversation.ts";
 import { modelFixture } from "./helpers/model.ts";
 
 type Bot = { id: string; name: string; title?: string; hidden?: boolean; endpoint?: string | null };
@@ -39,11 +39,13 @@ async function fixture(t: TestContext, calls: ({ name: string; arguments: object
     await db.close();
     await rm(directory, { recursive: true, force: true });
   });
+  const gateway = server.agent.openbot;
+  assert.ok(gateway);
   return {
     ...server,
     db,
     requests,
-    gateway: server.agent.openbot!,
+    gateway,
     conversation: new ConversationAgent(config, server.agent, "local-user"),
     input(text: string): RunAgentInput {
       return {
@@ -59,8 +61,8 @@ async function fixture(t: TestContext, calls: ({ name: string; arguments: object
 }
 
 async function run(chat: Awaited<ReturnType<typeof fixture>>, text: string) {
-  return (await lastValueFrom(chat.conversation.run(chat.input(text)).pipe(toArray()))).map((event) =>
-    EventSchemas.parse(event),
+  return (await lastValueFrom(chat.conversation.run(chat.input(text)).pipe(toArray()))).map(
+    (event) => EventSchemas.parse(event),
   );
 }
 
@@ -104,7 +106,9 @@ test("an explicit keep-it-here instruction suppresses Bot routing", async (t) =>
   await run(chat, "Handle this here; do not use a Bot. Give me a short outline.");
   assert.equal(rosterCalls, 0);
   assert.equal((await chat.db.list("local-user", "tasks")).length, 0);
-  assert.ok(chat.requests[0].body.includes("If the user explicitly says to handle the request here"));
+  assert.ok(
+    chat.requests[0].body.includes("If the user explicitly says to handle the request here"),
+  );
 });
 
 test("ties and ineligible stale-grant Bots are returned as choices or omitted", async (t) => {
@@ -124,7 +128,8 @@ test("ties and ineligible stale-grant Bots are returned as choices or omitted", 
     agents: ++rosterReads === 1 ? bots : [bots[2]],
   }));
   t.mock.method(chat.gateway, "eligibleBot", async (id: string) => {
-    const bot = bots.find((candidate) => candidate.id === id)!;
+    const bot = bots.find((candidate) => candidate.id === id);
+    assert.ok(bot);
     if (id === "stale") throw new Error("effective grants changed");
     return bot;
   });
