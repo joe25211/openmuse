@@ -1148,7 +1148,6 @@ export class AgentService {
       await save({
         lastProgressAt: now(),
         lastProgress: event.type,
-        transportLostAt: task.status === "outcome_unknown" ? delegation.transportLostAt : undefined,
         delayedAt: undefined,
         ...(event.cursor ? { replayCursor: event.cursor } : {}),
         ...(event.messageId
@@ -1270,18 +1269,20 @@ export class AgentService {
     if (delegation.terminal === "error")
       return { status: "failed", error: "The linked OpenBot run reported an error", delegation };
     try {
-      const output = await gateway.textResult(
-        delegation.botId,
-        delegation.threadId,
-        delegation.messageIds ?? [],
-      );
+      const output =
+        delegation.output ||
+        (await gateway.textResult(
+          delegation.botId,
+          delegation.threadId,
+          delegation.messageIds ?? [],
+        ));
       if (!output)
         return {
           status: "failed",
           error: "The linked OpenBot run finished without a usable answer",
           delegation,
         };
-      await save({ output });
+      if (!delegation.output) await save({ output });
       await context.event("result", "Bot answered", output);
       return { status: "succeeded", result: output, error: null, delegation };
     } catch (error) {

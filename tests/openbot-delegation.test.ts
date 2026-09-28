@@ -340,14 +340,35 @@ test("overprivileged Bot is refused and uncertain submission is never resent", a
     const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
     assert.equal(saved?.status, "running");
     assert.equal(saved.delegation?.submissionAttempted, true);
+    const transportLostAt = saved.delegation?.transportLostAt;
+    assert(transportLostAt);
     let clock = Date.now();
     t.mock.method(Date, "now", () => clock);
-    clock += 5 * 60_000 + 5000;
+    let replay = 0;
+    t.mock.method(
+      gateway,
+      "reconnectRun",
+      async (
+        _bot: string,
+        _thread: string,
+        _run: string,
+        _cursor: string | undefined,
+        onEvent: (event: { type: string; cursor?: string }) => Promise<void>,
+      ) => {
+        await onEvent({ type: "TEXT_MESSAGE_END", cursor: `replay-${++replay}` });
+        return { terminal: "unconfirmed" as const, messageIds: [], lost: true };
+      },
+    );
+    clock += 4 * 60_000;
+    await f.server.agent.worker.tick();
+    assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.status, "running");
+    clock += 60_000 + 5000;
     await f.server.agent.worker.tick();
     assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.status, "outcome_unknown");
-    const transportLostAt = (await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.delegation
-      ?.transportLostAt;
-    assert(transportLostAt);
+    assert.equal(
+      (await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.delegation?.transportLostAt,
+      transportLostAt,
+    );
     t.mock.method(
       gateway,
       "reconnectRun",
@@ -522,6 +543,59 @@ test("restart recovers the saved run and output without another submission", asy
     assert.equal(repeated.mock.callCount(), 0);
     assert.equal(connect.mock.callCount(), 1);
     assert.equal(f.channelCalls, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("restart commits a checkpointed answer when OpenBot history is unavailable", async (t) => {
+  const f = await fixture();
+  try {
+    let clock = Date.now();
+    t.mock.method(Date, "now", () => clock);
+    const response = await f.request("conversation-1", {
+      requestId: "checkpointed-answer",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    const first = f.server.agent.openbot;
+    assert(first);
+    t.mock.method(first, "runText", async () => ({
+      terminal: "finished" as const,
+      messageIds: ["answer-1"],
+    }));
+    t.mock.method(first, "textResult", async () => "Saved answer.");
+    const put = f.db.put.bind(f.db);
+    let interrupted = false;
+    t.mock.method(
+      f.db,
+      "put",
+      async (owner: string, collection: string, value: { id: string; kind?: string }) => {
+        if (collection === "run-events" && value.kind === "result" && !interrupted) {
+          interrupted = true;
+          throw new Error("interrupted after answer checkpoint");
+        }
+        return put(owner, collection, value);
+      },
+    );
+    await f.server.agent.worker.tick();
+    const checkpointed = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(checkpointed?.status, "running");
+    assert.equal(checkpointed.delegation?.terminal, "finished");
+    assert.equal(checkpointed.delegation?.output, "Saved answer.");
+    await f.restart();
+    const second = f.server.agent.openbot;
+    assert(second);
+    const history = t.mock.method(second, "textResult", async () => {
+      throw new Error("history unavailable");
+    });
+    clock += 6000;
+    await f.server.agent.worker.tick();
+    const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(saved?.status, "succeeded");
+    assert.equal(saved.result, "Saved answer.");
+    assert.equal(history.mock.callCount(), 0);
   } finally {
     await f.close();
   }
