@@ -314,8 +314,12 @@ test("named resource fallback sends only relevant authorized lines and user supp
     const multiline = await f.request("conversation-1", {
       requestId: "multiline-credential",
       botId: "bot-1",
-      prompt:
-        'Summarize supplied notes\nACME_PRIVATE_KEY="alpha beta\ngamma"\nKeep this instruction',
+      prompt: [
+        "Summarize supplied notes",
+        'ACME_PRIVATE_KEY="alpha beta\\',
+        'gamma"',
+        "Keep this instruction",
+      ].join("\n"),
       brief: "OPENAI_API_KEY=\nKeep the empty assignment separate",
       suppliedText: "garden facts supplied by the user",
     });
