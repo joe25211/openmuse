@@ -171,6 +171,8 @@ test("named resource fallback sends only relevant authorized lines and user supp
       [
         "garden roses need sunlight",
         "garden roses PRIVATE_KEY=RELEVANT_SECRET_SENTINEL need shade",
+        "garden roses Authorization: Basic dXNlcjpwYXNzMTIz need shade",
+        "garden roses https://reader:P4ssw0rd@example.test/notes",
         "unrelated PRIVATE_SENTINEL_COOKIE=keep-out",
         "garden roses need water",
       ].join("\n"),
@@ -189,6 +191,18 @@ test("named resource fallback sends only relevant authorized lines and user supp
     assert.match(task.delegation.sentContext, /garden roses need water/);
     assert.doesNotMatch(task.delegation.sentContext, /PRIVATE_SENTINEL/);
     assert.doesNotMatch(task.delegation.sentContext, /RELEVANT_SECRET_SENTINEL/);
+    assert.doesNotMatch(task.delegation.sentContext, /dXNlcjpwYXNzMTIz|P4ssw0rd/);
+    await writeFile(join(ownerPath, "..notes.txt"), "garden roses from valid dot-prefixed notes");
+    const dotFile = await f.request("conversation-1", {
+      ...input,
+      requestId: "valid-dot-filename",
+      sourcePath: "..notes.txt",
+    });
+    assert.equal(dotFile.status, 201, await dotFile.clone().text());
+    assert.match(
+      ((await dotFile.json()) as AgentTask).delegation?.sentContext ?? "",
+      /valid dot-prefixed notes/,
+    );
     await writeFile(
       join(ownerPath, "unsafe.txt"),
       "garden roses private key: UNSAFE_ONLY_SENTINEL",
@@ -252,6 +266,67 @@ test("named resource fallback sends only relevant authorized lines and user supp
     );
     f.setTools([{ ref: "host/shell" }]);
     assert.equal((await f.request("conversation-1", { ...input, requestId: "broad" })).status, 409);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a saved pre-fix excerpt is sanitized before its first submission", async (t) => {
+  const f = await fixture();
+  try {
+    const response = await f.request("conversation-1", {
+      requestId: "saved-excerpt",
+      botId: "bot-1",
+      prompt: "Summarize garden notes",
+      suppliedText: "safe garden notes",
+    });
+    assert.equal(response.status, 201);
+    const task = (await response.json()) as AgentTask;
+    assert(task.delegation);
+    await f.db.put(f.owner, "tasks", {
+      ...task,
+      delegation: {
+        ...task.delegation,
+        fallbackExcerpt: "garden Authorization: Basic QmFzaWNBdXRoMTIz\nsafe garden notes",
+        sentContext: "pre-fix context QmFzaWNBdXRoMTIz",
+      },
+    });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    const run = t.mock.method(
+      gateway,
+      "runText",
+      async (_botId: string, _threadId: string, runId: string, text: string) => {
+        assert.equal(runId, task.delegation?.runId);
+        assert.match(text, /safe garden notes/);
+        assert.doesNotMatch(text, /QmFzaWNBdXRoMTIz/);
+        return { terminal: "finished" as const, messageIds: ["answer-1"] };
+      },
+    );
+    t.mock.method(gateway, "textResult", async () => "Done.");
+    await f.server.agent.worker.tick();
+    assert.equal(run.mock.callCount(), 1);
+    const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.doesNotMatch(JSON.stringify(saved?.delegation), /QmFzaWNBdXRoMTIz/);
+    const second = await f.request("conversation-1", {
+      requestId: "saved-unsafe-only",
+      botId: "bot-1",
+      prompt: "Summarize garden notes",
+      suppliedText: "safe original text",
+    });
+    const unsafeOnly = (await second.json()) as AgentTask;
+    assert(unsafeOnly.delegation);
+    await f.db.put(f.owner, "tasks", {
+      ...unsafeOnly,
+      delegation: {
+        ...unsafeOnly.delegation,
+        fallbackExcerpt: "garden Authorization: Basic VW5zYWZlQXV0aA==",
+        sentContext: "pre-fix context VW5zYWZlQXV0aA==",
+      },
+    });
+    await f.server.agent.worker.tick();
+    assert.equal(run.mock.callCount(), 1);
+    assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", unsafeOnly.id))?.status, "failed");
   } finally {
     await f.close();
   }

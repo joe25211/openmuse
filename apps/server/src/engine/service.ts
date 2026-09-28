@@ -50,7 +50,14 @@ const terminal = new Set(["succeeded", "failed", "cancelled"]);
 const redact = (text: string) =>
   text
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\bAuthorization\s*:\s*Basic\s+\S+/gi, "Authorization: Basic [redacted]")
+    .replace(/\b(https?:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
     .replace(/\b(?:api[_-]?key|token|cookie|password|secret)\s*[:=]\s*\S+/gi, "[redacted]");
+
+const unsafeExcerptLine = (line: string) =>
+  /(?:secret|token|cookie|password|credential|(?:api|private|access)[\s_-]?key|bearer|\bAuthorization\s*:|\bBasic\s+[A-Za-z0-9+/=]{12,}|https?:\/\/[^\s/]*@|-----BEGIN)/i.test(
+    line,
+  );
 
 async function namedText(root: string | undefined, path: string) {
   const parts = path.split(/[\\/]/);
@@ -65,7 +72,8 @@ async function namedText(root: string | undefined, path: string) {
     }
     const target = await realpath(resolve(base, path));
     const inside = relative(join(base, parts[0] ?? ""), target);
-    if (!inside || inside.startsWith("..") || isAbsolute(inside)) throw new Error();
+    if (!inside || inside === ".." || inside.startsWith("../") || isAbsolute(inside))
+      throw new Error();
     const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const info = await handle.stat();
@@ -105,9 +113,7 @@ function relevantExcerpt(text: string, request: string) {
       .split(/\r?\n/)
       .filter(
         (line) =>
-          !/(?:secret|token|cookie|password|credential|(?:api|private|access)[\s_-]?key|bearer|-----BEGIN)/i.test(
-            line,
-          ) && [...words].some((word) => line.toLowerCase().includes(word)),
+          !unsafeExcerptLine(line) && [...words].some((word) => line.toLowerCase().includes(word)),
       )
       .slice(0, 6)
       .join("\n")
@@ -1181,6 +1187,37 @@ export class AgentService {
         ...(event.terminal ? { terminal: event.terminal } : {}),
       });
     };
+    if (!delegation.submissionAttempted) {
+      const safeExcerpt = delegation.fallbackExcerpt
+        ? redact(
+            delegation.fallbackExcerpt
+              .split(/\r?\n/)
+              .filter((line) => !unsafeExcerptLine(line))
+              .join("\n")
+              .slice(0, 4000),
+          )
+        : undefined;
+      const safeContext = sentContext({
+        prompt: task.prompt,
+        brief: delegation.brief,
+        sourcePath: delegation.sourcePath,
+        resourcePath: delegation.resourcePath,
+        excerpt: delegation.readMode === "direct" ? undefined : safeExcerpt,
+        mode: delegation.readMode,
+        conversationId: delegation.conversationId,
+        requestId: delegation.requestId,
+        botId: delegation.botId,
+        runId: delegation.runId,
+      });
+      if (delegation.fallbackExcerpt !== safeExcerpt || delegation.sentContext !== safeContext)
+        await save({ fallbackExcerpt: safeExcerpt, sentContext: safeContext });
+      if ((delegation.readMode === "excerpt" || delegation.readMode === "supplied") && !safeExcerpt)
+        return {
+          status: "failed",
+          error: "No safe named-resource read or excerpt is available",
+          delegation,
+        };
+    }
     if (!delegation.channelAttempted) {
       await gateway.eligibleBot(delegation.botId);
       await save({ channelAttempted: true });
