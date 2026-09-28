@@ -31,6 +31,7 @@ import { runConversationTurn } from "./conversation-run";
 import {
   type DelegatedPane,
   delegatedTaskStatus,
+  freshestTask,
   paneAfterHorizontalGesture,
   taskForConversation,
 } from "./delegated-chat";
@@ -1059,7 +1060,7 @@ function DelegatedTaskPane({ task }: { task: AgentTask }) {
     };
   }, [api, task.id, task.updatedAt]);
   const currentDetail = detail?.task.id === task.id ? detail : undefined;
-  const savedTask = currentDetail?.task ?? task;
+  const savedTask = freshestTask(task, currentDetail?.task);
   const result = savedTask.delegation?.output ?? savedTask.result;
   return (
     <View style={{ gap: 14 }}>

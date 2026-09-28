@@ -92,19 +92,20 @@ export function TaskThreadCard({ task }: { task: AgentTask }) {
       active = false;
     };
   }, [api, task.id, task.updatedAt, attempt]);
+  const currentDetail = detail?.task.id === task.id ? detail : undefined;
   return (
     <View style={{ gap: 12 }}>
-      <TaskCard task={detail?.task ?? task} compact />
-      {detail?.browsers.map((browser) => (
+      <TaskCard task={currentDetail?.task ?? task} compact />
+      {currentDetail?.browsers.map((browser) => (
         <BrowserThreadCard key={browser.id} browser={browser} />
       ))}
-      {[...(detail?.files || [])]
+      {[...(currentDetail?.files || [])]
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
         .slice(0, 1)
         .map((file) => (
           <FileThreadCard key={file.id} file={file} />
         ))}
-      {detail?.artifacts.map((artifact) => (
+      {currentDetail?.artifacts.map((artifact) => (
         <ArtifactCard key={artifact.id} artifact={artifact} />
       ))}
       <ErrorNotice error={error} />

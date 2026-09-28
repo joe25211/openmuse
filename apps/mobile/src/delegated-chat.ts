@@ -2,6 +2,10 @@ import type { AgentTask } from "../../../packages/domain/src/agent";
 
 export type DelegatedPane = "chat" | "task";
 
+export function freshestTask(task: AgentTask, detail?: AgentTask) {
+  return detail?.id === task.id && detail.updatedAt > task.updatedAt ? detail : task;
+}
+
 export function taskForConversation(tasks: AgentTask[], conversationId: string) {
   return [...tasks]
     .filter((task) => task.delegation?.conversationId === conversationId)
