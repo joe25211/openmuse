@@ -282,6 +282,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const [showFieldJson, setShowFieldJson] = useState(false);
   const [fields, setFields] = useState<Record<string, string | boolean>>({});
   const task = data?.tasks.find((item) => item.id === taskId) || detail?.task;
+  const uncertainAction = workspace.actions.find(
+    (action) => action.id === task?.actionId && action.status === "outcome_unknown",
+  );
   useEffect(() => {
     let active = true;
     void api
@@ -373,7 +376,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     <Sheet
       title={task?.title || "Task"}
       subtitle={
-        task ? `${statusLabel(task.status)} · ${stamp(task.updatedAt)}` : "Loading saved progress…"
+        task
+          ? `${uncertainAction ? "Outcome unknown" : statusLabel(task.status)} · ${stamp(task.updatedAt)}`
+          : "Loading saved progress…"
       }
       onClose={close}
     >
@@ -386,19 +391,20 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             {task.prompt}
           </Text>
           <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
-            {["queued", "running", "scheduled", "waiting_input", "waiting_approval"].includes(
-              task.status,
-            ) && (
-              <Button
-                small
-                icon={Pause}
-                busy={busy}
-                onPress={() => void act("control", { action: "pause" })}
-              >
-                Pause
-              </Button>
-            )}
-            {task.status === "paused" && (
+            {!uncertainAction &&
+              ["queued", "running", "scheduled", "waiting_input", "waiting_approval"].includes(
+                task.status,
+              ) && (
+                <Button
+                  small
+                  icon={Pause}
+                  busy={busy}
+                  onPress={() => void act("control", { action: "pause" })}
+                >
+                  Pause
+                </Button>
+              )}
+            {task.status === "paused" && !uncertainAction && (
               <Button
                 small
                 icon={Play}
@@ -418,7 +424,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 Retry task
               </Button>
             )}
-            {activeTask(task) && (
+            {activeTask(task) && !uncertainAction && (
               <Button
                 small
                 danger
@@ -430,7 +436,18 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               </Button>
             )}
           </View>
-          {task.status === "waiting_approval" && (
+          {uncertainAction && (
+            <Card style={{ backgroundColor: colors.orange, gap: 10 }}>
+              <Text style={s.heading}>Action outcome unknown</Text>
+              <Text style={s.muted}>
+                Check the connected app and this action before continuing the task.
+              </Text>
+              <Button small busy={busy} onPress={() => void review()}>
+                View linked action
+              </Button>
+            </Card>
+          )}
+          {task.status === "waiting_approval" && !uncertainAction && (
             <Card style={{ backgroundColor: colors.lavender, gap: 12 }}>
               <Text style={s.heading}>Ready for your review</Text>
               <Text style={s.muted}>Review the exact action and account before it proceeds.</Text>

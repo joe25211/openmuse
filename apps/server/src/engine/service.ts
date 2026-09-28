@@ -232,6 +232,14 @@ export class AgentService {
   }
   async control(owner: string, id: string, action: "pause" | "resume" | "cancel" | "retry") {
     const task = await this.getTask(owner, id);
+    if (task.actionId && action !== "pause") {
+      const linked = await this.db.get<ActionProposal>(owner, "actions", task.actionId);
+      if (linked?.status === "outcome_unknown")
+        throw new AppError(
+          "This action's outcome is unknown. Check the linked action and connected app before changing this task.",
+          409,
+        );
+    }
     if (action === "cancel" && task.status === "succeeded")
       throw new AppError("This task is already complete", 409);
     if (action === "retry" && task.status !== "failed")
@@ -751,6 +759,21 @@ export class AgentService {
           state: { ...task.state, approvalResult: action.result },
           actionId: null,
         });
+      } else if (action.status === "outcome_unknown") {
+        const detail = `Action outcome unknown: ${action.error ?? "The provider did not confirm this change."} Check the connected app and linked action before continuing.`;
+        await context.event("error", "Action needs reconciliation", detail);
+        return {
+          status: "paused",
+          error: detail,
+          state: {
+            ...task.state,
+            notice: {
+              title: "Action needs reconciliation",
+              body: detail,
+              key: `action-unknown:${action.id}`,
+            },
+          },
+        };
       } else if (action.status !== "awaiting_review" && action.status !== "executing")
         throw new Error(
           `Reviewed action ${action.status}: ${action.error ?? "No further action was taken"}`,

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Composio } from "@composio/core";
 import type { ProposalInput } from "../../../packages/domain/src/index.ts";
 import type { Config } from "./config.ts";
@@ -7,6 +8,13 @@ import { AppError } from "./errors.ts";
 type ComposioAction = Extract<ProposalInput, { kind: "composio.execute" }>;
 type SessionKind = "read" | "write";
 const utilityToolkits = new Set(["composio", "composio_search"]);
+const uncertainWrite = () =>
+  Object.assign(
+    new Error(
+      "Composio may have completed this action. Check the connected app before trying again.",
+    ),
+    { outcomeUnknown: true },
+  );
 
 export class ComposioService {
   private readonly sdk?: Composio;
@@ -30,24 +38,50 @@ export class ComposioService {
 
   private async session(owner: string, kind: SessionKind) {
     const sdk = this.client();
-    const saved = await this.db.get<{ id: string; sessionId: string }>(
+    const deployment =
+      (await this.db.insertIfAbsent("system", "composio-settings", {
+        id: "deployment",
+        namespace: randomUUID(),
+      })) ??
+      (await this.db.get<{ namespace: string }>("system", "composio-settings", "deployment"));
+    if (!deployment) throw new AppError("Composio deployment could not be loaded", 503);
+    const userId = `openmuse-${deployment.namespace}-${owner}`;
+    const saved = await this.db.get<{ id: string; sessionId: string; userId?: string }>(
       owner,
       "composio-sessions",
       kind,
     );
-    if (saved) return sdk.sessions.use(saved.sessionId);
-    const created = await sdk.sessions.create(owner, {
+    if (saved?.userId === userId) return sdk.sessions.use(saved.sessionId);
+    // Pre-namespace sessions cannot prove deployment ownership; reconnect their accounts.
+    const created = await sdk.sessions.create(userId, {
       manageConnections: false,
       sandbox: { enable: false },
       ...(kind === "read" ? { tags: ["readOnlyHint"] } : {}),
     });
-    const stored = await this.db.insertIfAbsent(owner, "composio-sessions", {
-      id: kind,
-      sessionId: created.sessionId,
-    });
+    const stored = saved
+      ? await this.db.compareAndSwap(
+          owner,
+          "composio-sessions",
+          kind,
+          { sessionId: saved.sessionId },
+          {
+            sessionId: created.sessionId,
+            userId,
+          },
+        )
+      : await this.db.insertIfAbsent(owner, "composio-sessions", {
+          id: kind,
+          sessionId: created.sessionId,
+          userId,
+        });
     if (stored) return created;
-    const winner = await this.db.get<{ sessionId: string }>(owner, "composio-sessions", kind);
-    if (!winner) throw new AppError("Composio session could not be loaded", 503);
+    const winner = await this.db.get<{ sessionId: string; userId?: string }>(
+      owner,
+      "composio-sessions",
+      kind,
+    );
+    if (!winner || winner.userId !== userId)
+      throw new AppError("Composio session could not be loaded", 503);
     return sdk.sessions.use(winner.sessionId);
   }
 
@@ -141,16 +175,10 @@ export class ComposioService {
     const session = await this.session(owner, "write");
     const result = await session
       .execute(input.data.tool, input.data.args, { account: connectionId })
-      .catch((error) => {
-        // A network failure may occur after the provider committed the change.
-        throw Object.assign(
-          new Error(error instanceof Error ? error.message : "Execution failed"),
-          {
-            outcomeUnknown: true,
-          },
-        );
+      .catch(() => {
+        throw uncertainWrite();
       });
-    if (result.error) throw new AppError(result.error, 502);
+    if (result.error) throw uncertainWrite();
     const encoded = JSON.stringify(result.data);
     return JSON.stringify({
       data: encoded.length > 30000 ? encoded.slice(0, 30000) : result.data,
