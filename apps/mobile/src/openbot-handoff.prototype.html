@@ -1,0 +1,238 @@
+<!doctype html>
+<!-- Throwaway UI prototype: three in-chat OpenBot task layouts, switchable with ?variant=A/B/C. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenMuse · OpenBot handoff prototype</title>
+  <style>
+    :root { color-scheme: dark; font: 15px/1.5 system-ui, sans-serif; background:#000; color:#c1c1c1; --card:#1c1c1c; --line:#333; --muted:#aaa; --accent:#8a9a7b; --danger:#e4a09a; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:0 14px 94px; }
+    button, select, textarea { font:inherit; }
+    button { cursor:pointer; }
+    button:focus-visible, select:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    .app { max-width:760px; min-height:calc(100vh - 94px); margin:auto; display:flex; flex-direction:column; }
+    .app.variant-B { max-width:1080px; }
+    .header { display:flex; align-items:flex-start; justify-content:space-between; padding:14px 6px 20px; text-align:center; }
+    .header button { border:0; background:none; color:var(--muted); font-size:23px; min-width:44px; min-height:44px; }
+    .brand { display:flex; flex-direction:column; align-items:center; gap:2px; }
+    .mark { display:grid; place-items:center; width:43px; height:43px; color:var(--accent); border:1px solid var(--line); border-radius:50%; font-size:24px; }
+    .brand strong { color:#ddd; line-height:1.1; }
+    .brand small { color:var(--muted); font-size:11px; }
+    .preview { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; border:1px dashed #4b5545; border-radius:17px; padding:10px 14px; margin-bottom:18px; }
+    .preview strong { font-size:12px; color:var(--accent); letter-spacing:.04em; text-transform:uppercase; }
+    .preview span { font-size:12px; color:var(--muted); }
+    .preview .controls { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+    .preview label { font-size:12px; }
+    select { border:1px solid var(--line); background:var(--card); color:#ddd; border-radius:11px; padding:6px 9px; }
+    main { flex:1; }
+    .bubble { max-width:89%; padding:13px 16px; border-radius:22px; margin:0 0 13px; background:var(--card); }
+    .bubble.user { margin-left:auto; background:#333; border-bottom-right-radius:7px; }
+    .bubble.assistant { border-bottom-left-radius:7px; }
+    .bubble p { margin:0; }
+    .bubble .name { display:block; font-size:11px; font-weight:650; color:var(--accent); margin-bottom:4px; }
+    .eyebrow { color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.13em; text-transform:uppercase; }
+    .muted { color:var(--muted); }
+    .tiny { font-size:11px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:22px; padding:17px; }
+    .row { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .row.top { align-items:flex-start; }
+    .task-title { margin:3px 0 2px; font-size:17px; color:#ddd; line-height:1.28; }
+    .status { display:inline-flex; align-items:center; gap:7px; border-radius:20px; padding:5px 10px; font-size:11px; font-weight:650; background:#293026; color:#bed3aa; white-space:nowrap; }
+    .status::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .status.completed { background:#283329; }
+    .status.failed { background:#372825; color:var(--danger); }
+    .status.needs-input { background:#353025; color:#dcc99c; }
+    .status.unknown { background:#34302a; color:#d2bc94; }
+    .link { color:var(--accent); background:none; border:0; padding:3px 0; font-weight:650; text-align:left; }
+    .link:hover { text-decoration:underline; }
+    .primary { background:var(--accent); border:0; color:#10150e; border-radius:20px; font-weight:700; padding:9px 14px; }
+    .secondary { background:#333; border:0; color:#ddd; border-radius:20px; padding:9px 14px; }
+    .task-copy { margin:10px 0 0; color:var(--muted); font-size:13px; line-height:1.5; }
+    .source { margin:12px 0 0; padding-top:10px; border-top:1px solid var(--line); color:var(--muted); font-size:11px; }
+    .answer { border-left:2px solid var(--accent); margin:12px 0; padding-left:12px; }
+    .answer p { margin:4px 0 0; }
+    .question { border-left:2px solid #dcc99c; margin:12px 0; padding-left:12px; }
+    .question p { margin:4px 0 0; }
+    .composer { display:flex; align-items:center; gap:10px; min-height:60px; margin:18px 0 11px; border:1px solid var(--line); border-radius:31px; padding:8px 9px 8px 18px; background:var(--card); color:var(--muted); }
+    .composer span { flex:1; }
+    .composer button { width:43px; height:43px; border:0; border-radius:50%; background:#333; color:#ccc; }
+    .nav { display:flex; justify-content:space-around; gap:4px; margin:0 auto; padding:5px; width:min(100%,370px); background:var(--card); border:1px solid var(--line); border-radius:30px; }
+    .nav span { flex:1; text-align:center; padding:10px 0; font-size:11px; color:var(--muted); }
+    .nav .active { background:#333; border-radius:23px; color:#ddd; }
+    .switcher { position:fixed; z-index:10; bottom:13px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:10px; max-width:calc(100vw - 20px); padding:6px; background:#dbe5d0; color:#141a11; border-radius:40px; box-shadow:0 8px 35px #000a; }
+    .switcher button { border:0; background:#b6c8a7; color:#121711; border-radius:50%; width:38px; height:38px; font-size:22px; }
+    .switcher strong { font-size:12px; white-space:nowrap; min-width:136px; text-align:center; }
+    .a-card { max-width:550px; margin:0 0 16px; }
+    .a-card .actions { display:flex; gap:15px; align-items:center; flex-wrap:wrap; margin-top:15px; }
+    .a-followup { margin-top:13px; }
+    .b-grid { display:grid; grid-template-columns:minmax(0, 1fr) minmax(290px, .72fr); gap:20px; align-items:start; }
+    .b-chat { min-width:0; }
+    .b-rail { border-left:1px solid var(--line); padding-left:20px; }
+    .b-rail .card { border:0; background:#151515; min-height:355px; }
+    .b-rail h2 { margin:6px 0 15px; font-size:20px; color:#ddd; }
+    .b-rail .action { margin-top:22px; }
+    .b-mini { display:flex; gap:9px; align-items:center; color:var(--muted); font-size:12px; margin:0 0 16px; }
+    .b-mini span { width:7px; height:7px; background:var(--accent); border-radius:50%; }
+    .c-banner { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--line); padding:8px 0 15px; margin-bottom:22px; }
+    .c-tabs { display:flex; gap:18px; border-bottom:1px solid var(--line); margin:0 0 18px; }
+    .c-tabs button { border:0; border-bottom:2px solid transparent; background:none; color:var(--muted); padding:9px 2px; }
+    .c-tabs button[aria-pressed="true"] { color:#ddd; border-color:var(--accent); }
+    .c-task { max-width:600px; margin:auto; }
+    .c-task h2 { font-size:25px; line-height:1.18; color:#ddd; margin:8px 0 12px; }
+    .c-task .card { margin:18px 0; }
+    .timeline { list-style:none; padding:0; margin:16px 0; }
+    .timeline li { border-left:2px solid var(--line); padding:0 0 17px 15px; color:var(--muted); font-size:13px; }
+    .timeline li:last-child { padding-bottom:0; }
+    .timeline strong { display:block; color:#ddd; font-size:13px; }
+    .divider { height:1px; background:var(--line); margin:20px 0; }
+    dialog { background:#0d0d0d; color:#c1c1c1; border:1px solid var(--line); border-radius:25px; width:min(620px, calc(100vw - 24px)); max-height:88vh; padding:0; }
+    dialog::backdrop { background:#000b; }
+    .dialog-head { position:sticky; top:0; display:flex; justify-content:space-between; align-items:center; background:#0d0d0d; border-bottom:1px solid var(--line); padding:17px 22px; }
+    .dialog-head strong { color:#ddd; font-size:18px; }
+    .dialog-head button { border:0; background:none; color:#ddd; font-size:23px; min-width:38px; min-height:38px; }
+    .dialog-body { padding:20px 22px 28px; overflow:auto; max-height:calc(88vh - 75px); }
+    .dialog-body h3 { color:#ddd; margin:22px 0 8px; font-size:15px; }
+    .dialog-body p { margin:9px 0; }
+    .dialog-body textarea { width:100%; min-height:80px; background:var(--card); color:#ddd; border:1px solid var(--line); border-radius:14px; padding:11px; resize:vertical; }
+    .callout { background:#1c1c1c; border-left:2px solid var(--accent); border-radius:0 14px 14px 0; padding:10px 13px; margin:13px 0; }
+    .callout.warn { border-color:var(--danger); }
+    #toast { position:fixed; left:50%; bottom:73px; transform:translateX(-50%); background:#333; color:#fff; padding:9px 14px; border-radius:14px; font-size:12px; z-index:20; box-shadow:0 8px 30px #000a; }
+    [hidden] { display:none!important; }
+    @media(max-width:680px) {
+      .b-grid { display:block; }
+      .b-rail { border-left:0; border-top:1px solid var(--line); padding:18px 0 0; margin-top:15px; }
+      .b-rail .card { min-height:0; }
+      .preview { align-items:flex-start; }
+      .preview .controls { width:100%; }
+      .header { padding-bottom:14px; }
+      .bubble { max-width:95%; }
+      .switcher strong { min-width:116px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="header">
+      <button type="button" data-mock aria-label="Open menu">☰</button>
+      <div class="brand"><span class="mark" aria-hidden="true">✦</span><strong>OpenMuse</strong><small id="header-status">Here when you need me</small></div>
+      <button type="button" data-mock aria-label="Notifications">♢</button>
+    </header>
+    <div class="preview">
+      <div><strong>Prototype · issue 6</strong><br><span>Mock task and Bot; no live handoff.</span></div>
+      <div class="controls">
+        <label for="state">Preview state</label>
+        <select id="state"><option value="running">Running</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="needs-input">Needs input</option></select>
+        <select id="failure-mode" aria-label="Failure case" hidden><option value="reported">Reported error</option><option value="unknown">Unknown outcome</option></select>
+      </div>
+    </div>
+    <main id="stage"></main>
+    <div class="composer"><span>Message OpenMuse…</span><button type="button" data-mock aria-label="Send message">↑</button></div>
+    <nav class="nav" aria-label="Workspace"><span class="active">Chat</span><span>Activity</span><span>Ideas</span><span>Goals</span><span>Apps</span></nav>
+  </div>
+  <div class="switcher" role="group" aria-label="Prototype layout variants">
+    <button id="prev" type="button" aria-label="Previous layout variant">←</button>
+    <strong id="variant-label"></strong>
+    <button id="next" type="button" aria-label="Next layout variant">→</button>
+  </div>
+  <dialog id="task-dialog" aria-labelledby="dialog-title"><div class="dialog-head"><strong id="dialog-title">OpenMuse task</strong><button id="close-task" type="button" aria-label="Close task">×</button></div><div class="dialog-body" id="dialog-body"></div></dialog>
+  <div id="toast" role="status" hidden></div>
+  <script>
+    const variants = { A: "Inline task card", B: "Persistent task rail", C: "Chat / task tabs" };
+    const params = new URLSearchParams(location.search);
+    let variant = variants[params.get("variant")] ? params.get("variant") : "A";
+    let state = ["running", "completed", "failed", "needs-input"].includes(params.get("state")) ? params.get("state") : "running";
+    let failureMode = "reported";
+    let pane = "chat";
+    const stateData = {
+      running: { label:"Running", summary:"Scout is working. OpenMuse is waiting for a verified run result.", step:"Waiting for a verified result", accent:"running" },
+      completed: { label:"Completed", summary:"Scout finished. OpenMuse saved the final answer in this task.", step:"Final answer saved", accent:"completed" },
+      failed: { label:"Failed", summary:"Scout reported an error. OpenMuse saved no final answer.", step:"Run error confirmed", accent:"failed" },
+      "needs-input": { label:"Needs input", summary:"Scout needs one detail before it can continue.", step:"Waiting for your reply", accent:"needs-input" }
+    };
+    function current() {
+      return state === "failed" && failureMode === "unknown"
+        ? { label:"Outcome unknown", summary:"The connection ended before OpenMuse could verify the result. The task has no final answer yet.", step:"Checking what happened", accent:"unknown" }
+        : stateData[state];
+    }
+    function stateContent() {
+      if (state === "completed") return `<div class="answer"><span class="eyebrow">Verified final answer</span><p>Scout found three quiet Saturday options: a morning walk by the lake, lunch near Lincoln Park, and an afternoon at the conservatory. I can help narrow these by time or budget.</p></div>`;
+      if (state === "needs-input") return `<div class="question"><span class="eyebrow">Question from Scout</span><p>What time should Saturday’s plan start?</p></div>`;
+      if (state === "failed" && failureMode === "reported") return `<div class="question"><span class="eyebrow">Confirmed run error</span><p>Scout could not complete the search. No final answer was saved.</p></div>`;
+      if (state === "failed") return `<div class="question"><span class="eyebrow">Verification needed</span><p>The connection dropped. Scout may have finished; OpenMuse cannot confirm the outcome yet.</p></div>`;
+      return `<p class="task-copy">Latest confirmed checkpoint: the handoff was accepted. No Bot answer is available yet.</p>`;
+    }
+    function handoff() { return `<div class="bubble assistant"><span class="name">OpenMuse</span><p>I’ll ask <strong>Scout · OpenBot</strong> to find a calm Saturday plan in Chicago. I’ll keep the task here and bring back the result once it’s verified.</p></div>`; }
+    function user() { return `<div class="bubble user"><p>Find a calm Saturday plan in Chicago. Keep it easy to get around.</p></div>`; }
+    function resultBubble() {
+      if (state === "completed") return `<div class="bubble assistant a-followup"><span class="name">OpenMuse · verified result</span><p>Scout finished the plan. The full answer is saved with the task; here’s the short version: lakeside morning, lunch near Lincoln Park, then the conservatory.</p></div>`;
+      if (state === "needs-input") return `<div class="bubble assistant a-followup"><span class="name">OpenMuse</span><p>Scout needs your start time to continue. You can reply inside this task.</p></div>`;
+      if (state === "failed") return `<div class="bubble assistant a-followup"><span class="name">OpenMuse</span><p>${failureMode === "unknown" ? "I lost the run connection and can’t confirm whether Scout finished. I’ll show the outcome here once it’s verified." : "Scout reported an error. I don’t have a final answer from this run."}</p></div>`;
+      return "";
+    }
+    function inlineCard() {
+      const d = current();
+      return `<article class="card a-card" aria-label="OpenBot task summary"><div class="row top"><div><span class="eyebrow">OpenMuse task · Scout / OpenBot</span><h2 class="task-title">Calm Saturday in Chicago</h2></div><span class="status ${d.accent}">${d.label}</span></div><p class="task-copy">${d.summary}</p>${stateContent()}<div class="actions"><button class="link" type="button" data-open-task>Open task →</button>${state === "needs-input" ? `<button class="secondary" type="button" data-open-task>Reply in task</button>` : ""}</div><p class="source">Saved in OpenMuse · Scout runs in OpenBot</p></article>`;
+    }
+    function rail() {
+      const d = current();
+      return `<aside class="b-rail" aria-label="Current task"><div class="card"><span class="eyebrow">Task for this chat</span><h2>Calm Saturday in Chicago</h2><p class="tiny">Scout · OpenBot</p><span class="status ${d.accent}">${d.label}</span><p class="task-copy">${d.summary}</p>${stateContent()}<div class="divider"></div><div class="eyebrow">Latest confirmed checkpoint</div><p>${d.step}</p><button class="primary action" type="button" data-open-task>${state === "needs-input" ? "Answer Scout’s question" : "Open full task"}</button><p class="source">Saved in OpenMuse · Scout runs in OpenBot</p></div></aside>`;
+    }
+    function taskPage() {
+      const d = current();
+      return `<section class="c-task"><div class="row top"><div><span class="eyebrow">OpenMuse task · Scout / OpenBot</span><h2>Calm Saturday in Chicago</h2></div><span class="status ${d.accent}">${d.label}</span></div><p class="muted">${d.summary}</p><div class="card"><span class="eyebrow">Latest confirmed checkpoint</span><h3>${d.step}</h3>${stateContent()}</div><h3>Activity</h3><ol class="timeline"><li><strong>Task saved in OpenMuse</strong>Current request sent to Scout.</li><li><strong>OpenBot handoff started</strong>OpenMuse is tracking the run.</li><li><strong>${d.step}</strong>${state === "completed" ? "Verified answer attached to the task." : state === "needs-input" ? "Your response is needed here." : state === "failed" ? "No final answer is shown without verification." : "No final answer yet."}</li></ol><button class="link" type="button" data-open-task>Open full task →</button><p class="source">Saved in OpenMuse · Scout runs in OpenBot</p></section>`;
+    }
+    function render() {
+      const d = current();
+      const stage = document.getElementById("stage");
+      document.getElementById("app").className = `app variant-${variant}`;
+      document.getElementById("header-status").textContent = state === "needs-input" ? "Scout needs your input" : state === "completed" ? "Scout finished your task" : state === "failed" ? d.label : "Scout is working on your task";
+      document.getElementById("state").value = state;
+      document.getElementById("failure-mode").hidden = state !== "failed";
+      document.getElementById("failure-mode").value = failureMode;
+      document.getElementById("variant-label").textContent = `${variant} · ${variants[variant]}`;
+      if (variant === "A") stage.innerHTML = `<section aria-label="Conversation">${user()}${handoff()}${inlineCard()}${resultBubble()}</section>`;
+      if (variant === "B") stage.innerHTML = `<div class="b-grid"><section class="b-chat" aria-label="Conversation">${user()}${handoff()}<p class="b-mini"><span></span>Scout’s task stays visible beside this chat.</p>${resultBubble()}</section>${rail()}</div>`;
+      if (variant === "C") stage.innerHTML = `<div class="c-banner"><div><span class="eyebrow">Scout · OpenBot</span><div class="tiny">${d.label} · ${d.step}</div></div><button class="link" type="button" data-pane="task">View task →</button></div><div class="c-tabs" role="group" aria-label="Conversation or task"><button type="button" aria-pressed="${pane === "chat"}" data-pane="chat">Chat</button><button type="button" aria-pressed="${pane === "task"}" data-pane="task">Task</button></div>${pane === "chat" ? `<section aria-label="Conversation">${user()}${handoff()}${resultBubble()}</section>` : taskPage()}`;
+      document.getElementById("dialog-body").innerHTML = `
+        <span class="status ${d.accent}">${d.label}</span>
+        <h3>Calm Saturday in Chicago</h3>
+        <p class="tiny muted">Assigned Bot: Scout · OpenBot</p>
+        <div class="callout ${d.accent === "failed" || d.accent === "unknown" ? "warn" : ""}"><strong>${d.step}</strong><p>${d.summary}</p></div>
+        ${stateContent()}
+        ${state === "needs-input" ? `<h3>Reply to Scout</h3><label class="tiny" for="reply">What time should Saturday’s plan start?</label><textarea id="reply" placeholder="For example, around 10 am"></textarea><p><button class="primary" type="button" data-mock>Preview sending reply</button></p>` : ""}
+        ${state === "failed" ? `<h3>New attempt</h3>${d.accent === "unknown" ? `<p class="tiny muted">The original run may still finish. Starting another attempt could duplicate the work.</p>` : `<p class="tiny muted">The previous run ended with a confirmed error.</p>`}<button class="secondary" type="button" data-mock>Start new attempt</button>` : ""}
+        <h3>Handoff context</h3>
+        <div class="card"><span class="eyebrow">Sent to Scout</span><p>Find a calm Saturday plan in Chicago. Keep it easy to get around.</p><p class="tiny muted">Current request only · No prior chat sent</p></div>
+        <h3>Activity</h3><ol class="timeline"><li><strong>Task saved in OpenMuse</strong>Current request prepared for Scout.</li><li><strong>Run handed to Scout</strong>OpenBot executes the work.</li><li><strong>${d.step}</strong>${d.accent === "unknown" ? "Final outcome has not been verified." : d.summary}</li></ol>
+        <p class="source">OpenMuse saves the status and result. Scout runs in OpenBot.</p>`;
+    }
+    function changeVariant(delta) {
+      const keys = Object.keys(variants);
+      variant = keys[(keys.indexOf(variant) + delta + keys.length) % keys.length];
+      pane = "chat";
+      const next = new URL(location.href); next.searchParams.set("variant", variant); history.replaceState(null, "", next);
+      render();
+    }
+    document.getElementById("prev").addEventListener("click", () => changeVariant(-1));
+    document.getElementById("next").addEventListener("click", () => changeVariant(1));
+    document.getElementById("state").addEventListener("change", event => { state = event.target.value; const next = new URL(location.href); next.searchParams.set("state", state); history.replaceState(null, "", next); render(); });
+    document.getElementById("failure-mode").addEventListener("change", event => { failureMode = event.target.value; render(); });
+    document.getElementById("close-task").addEventListener("click", () => document.getElementById("task-dialog").close());
+    document.addEventListener("click", event => {
+      if (event.target.closest("[data-open-task]")) document.getElementById("task-dialog").showModal();
+      const tab = event.target.closest("[data-pane]"); if (tab) { pane = tab.dataset.pane; render(); }
+      if (event.target.closest("[data-mock]")) { const toast = document.getElementById("toast"); toast.textContent = "Prototype only — no action was sent."; toast.hidden = false; setTimeout(() => toast.hidden = true, 2500); }
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (document.getElementById("task-dialog").open) return;
+      if (event.target.closest("input, textarea, select, [contenteditable]")) return;
+      event.preventDefault(); changeVariant(event.key === "ArrowRight" ? 1 : -1);
+    });
+    render();
+    console.assert(["A", "B", "C"].every(key => variants[key]) && ["running", "completed", "failed", "needs-input"].every(key => stateData[key]), "Prototype variant/state matrix is incomplete");
+  </script>
+</body>
+</html>
