@@ -58,7 +58,15 @@ export function sandbox(running = true, owner = "owner") {
       Tmpfs: { "/tmp": "rw,nosuid,nodev,noexec,size=67108864,mode=1777" },
       RestartPolicy: { Name: "no" },
     },
-    Mounts: [{ Type: "volume", Name: identity.volume, Destination: "/workspace", RW: true }],
+    Mounts: [
+      {
+        Type: "volume",
+        Name: identity.volume,
+        Source: `/var/lib/docker/volumes/${identity.volume}/_data`,
+        Destination: "/workspace",
+        RW: true,
+      },
+    ],
     NetworkSettings: { Networks: { none: {} } },
     State: { Running: running },
   };

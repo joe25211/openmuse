@@ -5,13 +5,15 @@
     "scheme": "openmuse",
     "version": "0.1.0",
     "orientation": "default",
-    "userInterfaceStyle": "light",
+    "backgroundColor": "#000000",
+    "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "ios": { "supportsTablet": true, "bundleIdentifier": "app.openmuse.mobile" },
     "android": { "package": "app.openmuse.mobile" },
     "web": { "bundler": "metro", "name": "OpenMuse — a little room for everything" },
     "plugins": [
       "expo-document-picker",
+      "expo-system-ui",
       "@config-plugins/react-native-blob-util",
       "@config-plugins/react-native-pdf"
     ]

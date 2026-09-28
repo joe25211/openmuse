@@ -587,11 +587,12 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
     }
   }
   const email = action.kind === "email.send";
+  const composio = action.kind === "composio.execute";
   return (
     <Sheet
       title={pending ? "One last look" : action.title}
       subtitle={
-        w.mode === "sample"
+        w.mode === "sample" && !composio
           ? "This action stays in your local workspace."
           : "Review this exact action before it changes your connected account."
       }
@@ -611,7 +612,17 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
       </View>
       <Card style={{ gap: 13 }}>
         <ReviewLine label="Account" value={action.account || w.profile.email} />
-        {email ? (
+        {composio ? (
+          <>
+            <ReviewLine label="App" value={String(d.toolkit || "")} />
+            <ReviewLine label="Action" value={String(d.tool || "")} />
+            <View style={s.divider} />
+            <Text style={s.label}>Exact arguments</Text>
+            <Text selectable style={s.text}>
+              {JSON.stringify(d.args ?? {}, null, 2)}
+            </Text>
+          </>
+        ) : email ? (
           <>
             <ReviewLine label="To" value={arrayText(d.to)} />
             <ReviewLine label="Cc" value={arrayText(d.cc) || "None"} />
@@ -697,13 +708,15 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
           </Text>
           <View style={[s.row, { gap: 10, flexWrap: "wrap" }]}>
             <Button primary icon={Check} busy={busy} onPress={() => void decide("approve")}>
-              {w.mode === "sample"
-                ? "Approve locally"
-                : email
-                  ? "Approve & send"
-                  : "Approve change"}
+              {composio
+                ? "Approve app action"
+                : w.mode === "sample"
+                  ? "Approve locally"
+                  : email
+                    ? "Approve & send"
+                    : "Approve change"}
             </Button>
-            {action.kind !== "calendar.delete" && (
+            {!composio && action.kind !== "calendar.delete" && (
               <Button icon={Edit3} disabled={busy} onPress={() => void edit()}>
                 Edit details
               </Button>

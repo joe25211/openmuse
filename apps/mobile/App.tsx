@@ -16,12 +16,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
+  Platform,
   Pressable,
   ScrollView,
   Text,
   useWindowDimensions,
   View,
 } from "react-native";
+import {
+  KeyboardAvoidingView as ControllerKeyboardAvoidingView,
+  KeyboardProvider,
+} from "react-native-keyboard-controller";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import type { Section, Workspace } from "../../packages/domain/src";
 import {
@@ -37,10 +42,11 @@ import { ChatScreen, WorkspaceTools } from "./src/chat";
 import { ComputerEntry } from "./src/computer";
 import { ComputerDraftProvider } from "./src/computer-drafts";
 import { Details } from "./src/details";
+import { OpenBotChat } from "./src/openbot-chat";
 import { BrowserScreen, CalendarScreen, FilesScreen, MailScreen } from "./src/screens";
 import { ThreadsProvider, ThreadsSheet, useMuseThread } from "./src/threads";
 import { Button, Card, colors, ErrorNotice, Field, IconButton, Mascot, s } from "./src/ui";
-import { type Detail, useWorkspace, WorkspaceContext } from "./src/workspace";
+import { type Detail, type OpenBotChannel, useWorkspace, WorkspaceContext } from "./src/workspace";
 
 const nav: { id: Section; label: string; icon: LucideIcon }[] = [
   { id: "chat", label: "Chat", icon: MessageCircle },
@@ -86,9 +92,9 @@ export default function App() {
   useEffect(() => {
     void connect();
   }, [connect]);
-  return (
+  const app = (
     <SafeAreaProvider>
-      <StatusBar style="dark" />
+      <StatusBar style="light" />
       {token ? (
         <CopilotKitProvider
           runtimeUrl={`${API_URL}/api/copilotkit`}
@@ -140,6 +146,7 @@ export default function App() {
       )}
     </SafeAreaProvider>
   );
+  return Platform.OS === "android" ? <KeyboardProvider>{app}</KeyboardProvider> : app;
 }
 function WorkspaceApp({ token }: { token: string }) {
   const api = useMemo(() => new MuseApi(token), [token]);
@@ -149,6 +156,7 @@ function WorkspaceApp({ token }: { token: string }) {
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
   const [prompt, setPrompt] = useState<{ id: number; text: string }>();
+  const [openbotChannel, setOpenbotChannel] = useState<OpenBotChannel>();
   const refresh = useCallback(async () => {
     const snapshot = await api.request<Workspace>("/api/workspace");
     setWorkspace(snapshot);
@@ -178,6 +186,10 @@ function WorkspaceApp({ token }: { token: string }) {
   const ask = useCallback((text: string) => {
     setPrompt({ id: Date.now(), text });
     setSection("chat");
+  }, []);
+  const openOpenBot = useCallback((channel: OpenBotChannel) => {
+    setOpenbotChannel(channel);
+    setSection("openbot");
   }, []);
   if (!workspace)
     return (
@@ -209,7 +221,19 @@ function WorkspaceApp({ token }: { token: string }) {
     );
   return (
     <WorkspaceContext.Provider
-      value={{ workspace, api, section, navigate, refresh, open, close, notify: setToast, ask }}
+      value={{
+        workspace,
+        api,
+        section,
+        navigate,
+        refresh,
+        open,
+        close,
+        notify: setToast,
+        ask,
+        openBotChannel: openbotChannel,
+        openOpenBot,
+      }}
     >
       <AgentWorkspaceProvider>
         <ComputerDraftProvider key={token}>
@@ -240,7 +264,7 @@ function WorkspaceShell({
   error: string;
   prompt?: { id: number; text: string };
 }) {
-  const { workspace, section, navigate, open } = useWorkspace();
+  const { section, navigate, open, openBotChannel: openbotChannel } = useWorkspace();
   const { data } = useAgentWorkspace();
   const {
     selection,
@@ -254,23 +278,24 @@ function WorkspaceShell({
   const [threadsOpen, setThreadsOpen] = useState(false);
   const { width } = useWindowDimensions();
   const desktop = width >= 900;
-  const pending =
-    (data?.notifications.filter((n) => !n.read).length || 0) +
-    workspace.actions.filter((a) => a.status === "awaiting_review").length;
+  const unread = data?.notifications.filter((n) => !n.read).length || 0;
   const activeTask =
     data?.tasks.find(
       (task) => task.status === "waiting_approval" || task.status === "waiting_input",
     ) || data?.tasks.find((task) => task.status === "running");
-  const agentName = data?.identity.name || "OpenMuse";
-  const status = activeTask
-    ? activeTask.status === "waiting_approval"
-      ? `Ready to review · ${activeTask.title}`
-      : activeTask.status === "waiting_input"
-        ? `Needs your input · ${activeTask.title}`
-        : activeTask.plan.find((step) => step.status === "running")?.title || activeTask.title
-    : data?.tasks.some((task) => task.status === "queued")
-      ? "Picking up your next task…"
-      : "Here when you need me";
+  const agentName = section === "openbot" ? "OpenBot" : data?.identity.name || "OpenMuse";
+  const status =
+    section === "openbot"
+      ? openbotChannel?.name || "Connected Bot"
+      : activeTask
+        ? activeTask.status === "waiting_approval"
+          ? `Ready to review · ${activeTask.title}`
+          : activeTask.status === "waiting_input"
+            ? `Needs your input · ${activeTask.title}`
+            : activeTask.plan.find((step) => step.status === "running")?.title || activeTask.title
+        : data?.tasks.some((task) => task.status === "queued")
+          ? "Picking up your next task…"
+          : "Here when you need me";
   const title = titles[section] || titles.apps;
   const Screen =
     section === "mail"
@@ -288,243 +313,262 @@ function WorkspaceShell({
                 : section === "goals"
                   ? GoalsScreen
                   : AppsScreen;
-  const utility = ["mail", "calendar", "browser", "files"].includes(section);
+  const utility = ["mail", "calendar", "browser", "files", "openbot"].includes(section);
+  const shell = (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.canvas }} edges={["top", "bottom"]}>
+      <View style={{ flex: 1, width: "100%", maxWidth: 760, alignSelf: "center" }}>
+        <View
+          style={{
+            height: desktop ? 146 : 122,
+            paddingTop: desktop ? 14 : 2,
+            marginHorizontal: 20,
+          }}
+        >
+          <View style={{ position: "absolute", left: 0, top: 16 }}>
+            <IconButton
+              icon={Menu}
+              label="Open conversations and menu"
+              onPress={() => setThreadsOpen(true)}
+            />
+          </View>
+          <View style={{ alignItems: "center", gap: 1 }}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${agentName} activity and approvals`}
+              onPress={() => navigate("activity")}
+              style={({ pressed }) => ({
+                alignItems: "center",
+                maxWidth: "70%",
+                opacity: pressed ? 0.65 : 1,
+              })}
+            >
+              <Mascot size={desktop ? 58 : 49} variant={data?.identity.avatar} />
+              <Text
+                style={{
+                  fontSize: 16,
+                  fontWeight: "600",
+                  color: colors.text,
+                  letterSpacing: -0.4,
+                }}
+              >
+                {agentName}
+              </Text>
+              <Text
+                numberOfLines={1}
+                style={{ fontSize: 11, color: colors.muted, marginBottom: 6 }}
+              >
+                {status}
+              </Text>
+            </Pressable>
+            {section === "chat" && <ComputerEntry />}
+          </View>
+          <View style={{ position: "absolute", right: 0, top: 16 }}>
+            <IconButton
+              icon={Bell}
+              label={`Notifications, ${unread} unread`}
+              onPress={() => open({ type: "notifications" })}
+            />
+            {unread > 0 && (
+              <View
+                pointerEvents="none"
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: 4,
+                  position: "absolute",
+                  top: 7,
+                  right: 9,
+                  backgroundColor: colors.blueDark,
+                }}
+              />
+            )}
+          </View>
+        </View>
+        <View style={{ flex: 1, minHeight: 0 }}>
+          {section !== "chat" && section !== "openbot" && (
+            <ScrollView
+              key={section}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={{ paddingHorizontal: desktop ? 42 : 22, paddingBottom: 28 }}
+              keyboardShouldPersistTaps="handled"
+            >
+              {utility && (
+                <Button
+                  small
+                  style={{ alignSelf: "flex-start", marginBottom: 18 }}
+                  onPress={() => navigate("apps")}
+                >
+                  Back to Apps
+                </Button>
+              )}
+              <Text style={[s.title, { fontSize: 25, marginBottom: 22 }]}>{title?.title}</Text>
+              <ErrorNotice error={error} />
+              <Screen />
+            </ScrollView>
+          )}
+          {section === "openbot" && openbotChannel && (
+            <View style={{ flex: 1, paddingHorizontal: desktop ? 42 : 17 }}>
+              <Button
+                small
+                style={{ alignSelf: "flex-start", marginBottom: 8 }}
+                onPress={() => navigate("apps")}
+              >
+                Back to Apps
+              </Button>
+              <OpenBotChat channel={openbotChannel} />
+            </View>
+          )}
+          <View
+            style={{
+              display: section === "chat" ? "flex" : "none",
+              flex: 1,
+              paddingHorizontal: desktop ? 42 : 17,
+            }}
+          >
+            <AgentStatus />
+            {richThreads ? (
+              <>
+                <ErrorNotice error={threadsError} />
+                {threadsError ? (
+                  <Button onPress={retryThreads}>Retry main chat</Button>
+                ) : threadsLoading ? (
+                  <ActivityIndicator color={colors.blueDark} />
+                ) : null}
+                {!threadsLoading && selection.id !== mainId && (
+                  <Text style={[s.small, { textAlign: "center", marginBottom: 8 }]}>Side chat</Text>
+                )}
+                {visited.map((thread) => (
+                  <View
+                    key={thread.id}
+                    style={{ display: selection.id === thread.id ? "flex" : "none", flex: 1 }}
+                  >
+                    <ChatScreen
+                      thread={thread}
+                      active={section === "chat" && selection.id === thread.id}
+                      prompt={selection.id === thread.id ? prompt : undefined}
+                    />
+                  </View>
+                ))}
+              </>
+            ) : (
+              <ChatScreen prompt={prompt} active={section === "chat"} />
+            )}
+          </View>
+        </View>
+        <View
+          style={{
+            paddingHorizontal: 22,
+            paddingTop: 10,
+            paddingBottom: desktop ? 22 : 7,
+            alignItems: "center",
+          }}
+        >
+          <View
+            style={{
+              flexDirection: "row",
+              width: "100%",
+              maxWidth: 370,
+              padding: 5,
+              backgroundColor: colors.card,
+              borderRadius: 40,
+              shadowColor: colors.canvas,
+              shadowOffset: { width: 0, height: 2 },
+              shadowOpacity: 0.07,
+              shadowRadius: 18,
+              elevation: 3,
+              borderWidth: 1,
+              borderColor: colors.line,
+            }}
+          >
+            {nav.map((item) => {
+              const active = section === item.id || (item.id === "apps" && utility);
+              return (
+                <Pressable
+                  key={item.id}
+                  accessibilityRole="tab"
+                  accessibilityLabel={item.label}
+                  accessibilityState={{ selected: active }}
+                  onPress={() => navigate(item.id)}
+                  style={{
+                    flex: 1,
+                    height: 47,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    backgroundColor: active ? colors.line : "transparent",
+                    borderRadius: 28,
+                  }}
+                >
+                  <item.icon size={23} strokeWidth={1.8} color={colors.text} />
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      </View>
+      {!!toast && (
+        <View
+          pointerEvents="box-none"
+          style={{ position: "absolute", bottom: 94, left: 20, right: 20, alignItems: "center" }}
+        >
+          <View
+            style={[
+              s.row,
+              {
+                gap: 10,
+                padding: 14,
+                backgroundColor: colors.line,
+                borderRadius: 20,
+                maxWidth: 560,
+              },
+            ]}
+          >
+            <Check size={16} color={colors.blueDark} />
+            <Text style={{ color: colors.text, fontSize: 13, flexShrink: 1 }}>{toast}</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss notification"
+              onPress={clearToast}
+            >
+              <X size={16} color={colors.text} />
+            </Pressable>
+          </View>
+        </View>
+      )}
+      {threadsOpen && <ThreadsSheet onClose={() => setThreadsOpen(false)} />}
+      {detail && (
+        <Details
+          key={
+            detail.type === "task"
+              ? detail.taskId
+              : detail.type === "file"
+                ? detail.file.id
+                : detail.type === "browser"
+                  ? detail.browser.id
+                  : detail.type === "mail"
+                    ? detail.mail.id
+                    : detail.type === "review"
+                      ? detail.action.id
+                      : detail.type === "email"
+                        ? JSON.stringify(detail.draft)
+                        : detail.type === "event"
+                          ? detail.event?.id || "event-new"
+                          : detail.type
+          }
+          detail={detail}
+        />
+      )}
+    </SafeAreaView>
+  );
   return (
     <>
       <WorkspaceTools />
-      <SafeAreaView style={{ flex: 1, backgroundColor: colors.canvas }} edges={["top", "bottom"]}>
-        <View style={{ flex: 1, width: "100%", maxWidth: 760, alignSelf: "center" }}>
-          <View
-            style={{
-              height: desktop ? 146 : 122,
-              paddingTop: desktop ? 14 : 2,
-              marginHorizontal: 20,
-            }}
-          >
-            <View style={{ position: "absolute", left: 0, top: 16 }}>
-              <IconButton
-                icon={Menu}
-                label="Open conversations and menu"
-                onPress={() => setThreadsOpen(true)}
-              />
-            </View>
-            <View style={{ alignItems: "center", gap: 1 }}>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Open ${agentName} activity and approvals`}
-                onPress={() => navigate("activity")}
-                style={({ pressed }) => ({
-                  alignItems: "center",
-                  maxWidth: "70%",
-                  opacity: pressed ? 0.65 : 1,
-                })}
-              >
-                <Mascot size={desktop ? 58 : 49} variant={data?.identity.avatar} />
-                <Text
-                  style={{
-                    fontSize: 16,
-                    fontWeight: "600",
-                    color: colors.text,
-                    letterSpacing: -0.4,
-                  }}
-                >
-                  {agentName}
-                </Text>
-                <Text
-                  numberOfLines={1}
-                  style={{ fontSize: 11, color: colors.muted, marginBottom: 6 }}
-                >
-                  {status}
-                </Text>
-              </Pressable>
-              {section === "chat" && <ComputerEntry />}
-            </View>
-            <View style={{ position: "absolute", right: 0, top: 16 }}>
-              <IconButton
-                icon={Bell}
-                label={`Notifications, ${pending} unread or pending`}
-                onPress={() => open({ type: "notifications" })}
-              />
-              {pending > 0 && (
-                <View
-                  pointerEvents="none"
-                  style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: 4,
-                    position: "absolute",
-                    top: 7,
-                    right: 9,
-                    backgroundColor: colors.blueDark,
-                  }}
-                />
-              )}
-            </View>
-          </View>
-          <View style={{ flex: 1, minHeight: 0 }}>
-            {section !== "chat" && (
-              <ScrollView
-                key={section}
-                showsVerticalScrollIndicator={false}
-                contentContainerStyle={{ paddingHorizontal: desktop ? 42 : 22, paddingBottom: 28 }}
-                keyboardShouldPersistTaps="handled"
-              >
-                {utility && (
-                  <Button
-                    small
-                    style={{ alignSelf: "flex-start", marginBottom: 18 }}
-                    onPress={() => navigate("apps")}
-                  >
-                    Back to Apps
-                  </Button>
-                )}
-                <Text style={[s.title, { fontSize: 25, marginBottom: 22 }]}>{title?.title}</Text>
-                <ErrorNotice error={error} />
-                <Screen />
-              </ScrollView>
-            )}
-            <View
-              style={{
-                display: section === "chat" ? "flex" : "none",
-                flex: 1,
-                paddingHorizontal: desktop ? 42 : 17,
-              }}
-            >
-              <AgentStatus />
-              {richThreads ? (
-                <>
-                  <ErrorNotice error={threadsError} />
-                  {threadsError ? (
-                    <Button onPress={retryThreads}>Retry main chat</Button>
-                  ) : threadsLoading ? (
-                    <ActivityIndicator color={colors.blueDark} />
-                  ) : null}
-                  {!threadsLoading && selection.id !== mainId && (
-                    <Text style={[s.small, { textAlign: "center", marginBottom: 8 }]}>
-                      Side chat
-                    </Text>
-                  )}
-                  {visited.map((thread) => (
-                    <View
-                      key={thread.id}
-                      style={{ display: selection.id === thread.id ? "flex" : "none", flex: 1 }}
-                    >
-                      <ChatScreen
-                        thread={thread}
-                        active={section === "chat" && selection.id === thread.id}
-                        prompt={selection.id === thread.id ? prompt : undefined}
-                      />
-                    </View>
-                  ))}
-                </>
-              ) : (
-                <ChatScreen prompt={prompt} active={section === "chat"} />
-              )}
-            </View>
-          </View>
-          <View
-            style={{
-              paddingHorizontal: 22,
-              paddingTop: 10,
-              paddingBottom: desktop ? 22 : 7,
-              alignItems: "center",
-            }}
-          >
-            <View
-              style={{
-                flexDirection: "row",
-                width: "100%",
-                maxWidth: 370,
-                padding: 5,
-                backgroundColor: "#FFF",
-                borderRadius: 40,
-                shadowColor: "#132631",
-                shadowOffset: { width: 0, height: 2 },
-                shadowOpacity: 0.07,
-                shadowRadius: 18,
-                elevation: 3,
-                borderWidth: 1,
-                borderColor: "#F8F8F8",
-              }}
-            >
-              {nav.map((item) => {
-                const active = section === item.id || (item.id === "apps" && utility);
-                return (
-                  <Pressable
-                    key={item.id}
-                    accessibilityRole="tab"
-                    accessibilityLabel={item.label}
-                    accessibilityState={{ selected: active }}
-                    onPress={() => navigate(item.id)}
-                    style={{
-                      flex: 1,
-                      height: 47,
-                      alignItems: "center",
-                      justifyContent: "center",
-                      backgroundColor: active ? "#F0F1F2" : "transparent",
-                      borderRadius: 28,
-                    }}
-                  >
-                    <item.icon size={23} strokeWidth={1.8} color={colors.text} />
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-        </View>
-        {!!toast && (
-          <View
-            pointerEvents="box-none"
-            style={{ position: "absolute", bottom: 94, left: 20, right: 20, alignItems: "center" }}
-          >
-            <View
-              style={[
-                s.row,
-                {
-                  gap: 10,
-                  padding: 14,
-                  backgroundColor: colors.text,
-                  borderRadius: 20,
-                  maxWidth: 560,
-                },
-              ]}
-            >
-              <Check size={16} color={colors.blue} />
-              <Text style={{ color: "#FFF", fontSize: 13, flexShrink: 1 }}>{toast}</Text>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Dismiss notification"
-                onPress={clearToast}
-              >
-                <X size={16} color="#FFF" />
-              </Pressable>
-            </View>
-          </View>
-        )}
-        {threadsOpen && <ThreadsSheet onClose={() => setThreadsOpen(false)} />}
-        {detail && (
-          <Details
-            key={
-              detail.type === "task"
-                ? detail.taskId
-                : detail.type === "file"
-                  ? detail.file.id
-                  : detail.type === "browser"
-                    ? detail.browser.id
-                    : detail.type === "mail"
-                      ? detail.mail.id
-                      : detail.type === "review"
-                        ? detail.action.id
-                        : detail.type === "email"
-                          ? JSON.stringify(detail.draft)
-                          : detail.type === "event"
-                            ? detail.event?.id || "event-new"
-                            : detail.type
-            }
-            detail={detail}
-          />
-        )}
-      </SafeAreaView>
+      {Platform.OS === "android" ? (
+        <ControllerKeyboardAvoidingView behavior="height" style={{ flex: 1 }}>
+          {shell}
+        </ControllerKeyboardAvoidingView>
+      ) : (
+        shell
+      )}
     </>
   );
 }

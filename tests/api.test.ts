@@ -58,6 +58,28 @@ test("API protects private data and rejects unrelated web origins", async () => 
     403,
   );
 });
+test("Composio stays unavailable without a server project key", async () => {
+  const workspace: Workspace = await (
+    await app.request("/api/workspace", { headers: headers() })
+  ).json();
+  assert.equal(
+    workspace.connections.find((connection) => connection.id === "composio")?.status,
+    "unconfigured",
+  );
+  assert.equal((await app.request("/api/composio/toolkits")).status, 401);
+  assert.equal((await app.request("/api/composio/toolkits", { headers: headers() })).status, 503);
+});
+test("Composio utility toolkits are not connectable apps", async () => {
+  for (const toolkit of ["composio", "composio_search"]) {
+    const response = await app.request("/api/composio/connect", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ toolkit }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /Choose a specific app/);
+  }
+});
 test("sample workspace serves a real PDF and filling creates a new version", async () => {
   const response = await app.request("/api/workspace", { headers: headers() });
   assert.equal(response.status, 200);

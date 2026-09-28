@@ -15,6 +15,8 @@ Enable it on the API and any separate task worker, then restart them:
 ```dotenv
 COMPUTER_ENABLED=true
 COMPUTER_IMAGE=openmuse-computer:local
+# Optional: mount one existing host directory at /workspace instead of a named volume.
+# COMPUTER_HOST_DIR=/home/joe/Programs/openmuse
 ```
 
 Open **Computer → Terminal → Start computer**. Run `pwd` or `python3 --version`. Commands execute inside the Linux container with `/workspace` as their default working directory. Their output, exit code, and status appear in command history.
@@ -41,13 +43,13 @@ The explicit context applies to that command and its child processes. It does no
 - **Copy a document here** copies an owned PDF from OpenMuse into the current folder. A matching filename is replaced.
 - Open a PDF in the workspace to save a copy to OpenMuse Documents and view it in the native/web reader.
 - Browser downloads first enter Documents through **Import PDF downloads**, then can be copied into the Linux workspace.
-- Stopping the computer ends its running commands and keeps the named workspace volume. Starting it again restores those files.
+- Stopping the computer ends its running commands and keeps `/workspace` files in the configured host directory or named volume. Starting it again restores those files.
 
 The terminal runs bounded commands and displays their saved results. It is not an interactive PTY: full-screen terminal apps and prompts that require ongoing keyboard input are not supported. Write noninteractive scripts or edit files through the Files tab.
 
 ## Isolation and scope
 
-The workspace is a Docker container running as a nonroot user, with a read-only root filesystem, limited temporary storage and resources, dropped capabilities, and no added privileges. It receives no host directory mounts, Docker socket, model keys, Google tokens, or API access key. A named volume provides persistent `/workspace` storage.
+The workspace is a Docker container running as a nonroot user, with a read-only root filesystem, limited temporary storage and resources, dropped capabilities, and no added privileges. The app does not inject its Docker socket, model keys, Google tokens, or API access key. By default, a named volume provides persistent `/workspace` storage. Set `COMPUTER_HOST_DIR` to an existing absolute directory to mount that one host directory writable at `/workspace`; the API and Docker engine must see the same path, and the directory must be writable by UID 1000. The computer can access, modify, and delete everything placed in that directory, including any credentials or sockets. Symlinked paths are rejected. Changing storage for an existing computer requires stopping and removing its managed container before starting it again; existing volume files are not copied automatically.
 
 Terminal networking is disabled. The existing browser worker handles public web access through its own destination checks; see its [network boundary](../apps/worker/README.md#network-boundary). Browser profiles and workspace files have separate storage and lifecycle controls.
 

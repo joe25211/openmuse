@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, test } from "node:test";
-import { ComputerService, type DockerResult } from "../apps/server/src/computer.ts";
+import {
+  ComputerService,
+  type DockerResult,
+  type DockerRunner,
+} from "../apps/server/src/computer.ts";
 import { createStore, type Store } from "../apps/server/src/db.ts";
 import { config, fixture, ok, sandbox } from "./helpers/computer.ts";
 
@@ -118,6 +125,82 @@ test("attaching an existing container fails closed on unsafe isolation or owner 
     const service = new ComputerService(db, config, f.runner);
     await assert.rejects(service.execute("owner", { command: "pwd" }), /isolation|ownership/);
     assert.ok(!f.calls.some((c) => c.args[0] === "exec"));
+  }
+});
+
+test("configured host directory is the only writable workspace mount", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "openmuse-computer-"));
+  const link = `${dir}-link`;
+  try {
+    const inspect = sandbox();
+    inspect.Mounts[0].Type = "bind";
+    inspect.Mounts[0].Source = dir;
+    const f = fixture({ inspect });
+    const service = new ComputerService(db, { ...config, computerHostDir: dir }, f.runner);
+    assert.equal((await service.snapshot("owner")).status, "running");
+    assert.ok(!f.calls.some((c) => c.args[0] === "volume"));
+
+    let created = false;
+    const fresh = fixture({ inspect });
+    const runner: DockerRunner = async (args, options) => {
+      const result = await fresh.runner(args, options);
+      if (args[0] === "container" && args[1] === "ls") return ok(created ? "container-id\n" : "");
+      if (args[0] === "container" && args[1] === "create") created = true;
+      return result;
+    };
+    await new ComputerService(db, { ...config, computerHostDir: dir }, runner).start("owner");
+    assert.ok(
+      fresh.calls.some((c) => c.args.includes(`type=bind,source=${dir},target=/workspace`)),
+    );
+    assert.ok(!fresh.calls.some((c) => c.args[0] === "volume"));
+
+    for (const bad of [
+      { ...inspect, Mounts: [{ ...inspect.Mounts[0], Type: "volume" }] },
+      { ...inspect, Mounts: [{ ...inspect.Mounts[0], Source: `${dir}-other` }] },
+      { ...inspect, Mounts: [...inspect.Mounts, { ...inspect.Mounts[0] }] },
+    ]) {
+      const unsafe = fixture({ inspect: bad });
+      await assert.rejects(
+        new ComputerService(db, { ...config, computerHostDir: dir }, unsafe.runner).execute(
+          "owner",
+          { command: "pwd" },
+        ),
+        /isolation|ownership/,
+      );
+      assert.ok(!unsafe.calls.some((c) => c.args[0] === "exec"));
+    }
+
+    symlinkSync(dir, link);
+    for (const hostDir of ["relative/path", `${dir}-missing`, link]) {
+      const invalid = fixture({ missing: true });
+      await assert.rejects(
+        new ComputerService(db, { ...config, computerHostDir: hostDir }, invalid.runner).start(
+          "owner",
+        ),
+        /COMPUTER_HOST_DIR/,
+      );
+      assert.equal(invalid.calls.length, 0);
+    }
+  } finally {
+    rmSync(link, { force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("Stop can stop the managed container after its host directory disappears", async () => {
+  const owner = "owner-missing-host-dir";
+  const dir = mkdtempSync(join(tmpdir(), "openmuse-computer-stop-"));
+  try {
+    const inspect = sandbox(true, owner);
+    inspect.Mounts[0].Type = "bind";
+    inspect.Mounts[0].Source = dir;
+    const f = fixture({ inspect, owner });
+    const service = new ComputerService(db, { ...config, computerHostDir: dir }, f.runner);
+    rmSync(dir, { recursive: true });
+    await service.stop(owner);
+    assert.ok(f.calls.some((c) => c.args[0] === "container" && c.args[1] === "stop"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

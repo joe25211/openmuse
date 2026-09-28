@@ -8,6 +8,7 @@ import {
 import type { Store } from "./db.ts";
 import { AppError } from "./errors.ts";
 
+type ComposioAction = Extract<ProposalInput, { kind: "composio.execute" }>;
 interface Options {
   execute: (
     owner: string,
@@ -26,6 +27,10 @@ interface Options {
   }>;
   connected: (owner: string) => Promise<boolean>;
   connection?: (owner: string) => Promise<{ id: string; account: string } | null>;
+  composio?: {
+    connection: (owner: string, input: ComposioAction) => Promise<{ id: string; account: string }>;
+    execute: (owner: string, input: ComposioAction, connectionId?: string) => Promise<string>;
+  };
   now?: () => number;
 }
 export class ActionService {
@@ -51,17 +56,25 @@ export class ActionService {
       if (existing) return existing;
     }
     const parsed = proposalSchema.parse(raw);
-    const connection = await this.options.connection?.(owner);
-    if (this.options.connection && !connection)
+    const composio = parsed.kind === "composio.execute";
+    const connection = composio
+      ? await this.options.composio?.connection(owner, parsed)
+      : await this.options.connection?.(owner);
+    if (composio && !this.options.composio) throw new AppError("Composio is not configured", 503);
+    if (!composio && this.options.connection && !connection)
       throw new AppError("Connect Google before preparing an action", 409);
-    const prepared = await this.options.prepare?.(owner, parsed, connection?.id);
+    const prepared = composio
+      ? undefined
+      : await this.options.prepare?.(owner, parsed, connection?.id);
     const input = proposalSchema.parse(prepared?.input ?? parsed);
     const title =
-      input.kind === "email.send"
-        ? `Send “${input.data.subject}”`
-        : input.kind === "calendar.delete"
-          ? `Delete ${input.data.title}`
-          : `${input.kind === "calendar.create" ? "Create" : "Update"} ${input.data.title}`;
+      input.kind === "composio.execute"
+        ? `Run ${input.data.tool} in ${input.data.toolkit}`
+        : input.kind === "email.send"
+          ? `Send “${input.data.subject}”`
+          : input.kind === "calendar.delete"
+            ? `Delete ${input.data.title}`
+            : `${input.kind === "calendar.create" ? "Create" : "Update"} ${input.data.title}`;
     const createdAt = new Date(this.now()).toISOString();
     const proposal: ActionProposal = {
       id,
@@ -133,17 +146,25 @@ export class ActionService {
       }
       throw new AppError("This review expired. Create a fresh proposal.", 409);
     }
-    if (decision === "approve" && !(await this.options.connected(owner)))
+    const input = proposalSchema.parse({ kind: proposal.kind, data: proposal.data });
+    if (
+      decision === "approve" &&
+      input.kind !== "composio.execute" &&
+      !(await this.options.connected(owner))
+    )
       throw new AppError("Google is disconnected. Reconnect before approving this action.", 409);
-    if (decision === "approve" && this.options.connection) {
-      const connection = await this.options.connection(owner);
+    if (decision === "approve" && (input.kind === "composio.execute" || this.options.connection)) {
+      const connection =
+        input.kind === "composio.execute"
+          ? await this.options.composio?.connection(owner, input)
+          : await this.options.connection?.(owner);
       if (
         !connection ||
         connection.id !== proposal.connectionId ||
         connection.account !== proposal.account
       )
         throw new AppError(
-          "Google account or connection changed. Prepare a new action for the connected account.",
+          "Account or connection changed. Prepare a new action for the connected account.",
           409,
         );
     }
@@ -166,13 +187,17 @@ export class ActionService {
     if (decision === "deny") return claimed;
     let finished: ActionProposal;
     try {
-      const input = proposalSchema.parse({ kind: claimed.kind, data: claimed.data });
-      const result = await this.options.execute(
-        owner,
-        input,
-        claimed.connectionId,
-        claimed.targetVersion,
-      );
+      let result: string;
+      if (input.kind === "composio.execute") {
+        if (!this.options.composio) throw new AppError("Composio is not configured", 503);
+        result = await this.options.composio.execute(owner, input, claimed.connectionId);
+      } else
+        result = await this.options.execute(
+          owner,
+          input,
+          claimed.connectionId,
+          claimed.targetVersion,
+        );
       finished = { ...claimed, status: "succeeded", result };
     } catch (error) {
       const unknown =

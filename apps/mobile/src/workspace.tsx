@@ -23,6 +23,12 @@ export type Detail =
   | { type: "notifications" }
   | { type: "computer" }
   | { type: "menu" };
+export interface OpenBotChannel {
+  id: string;
+  name: string;
+  agentIds: string[];
+  threadId: string;
+}
 export interface WorkspaceContextValue {
   workspace: Workspace;
   api: MuseApi;
@@ -33,6 +39,8 @@ export interface WorkspaceContextValue {
   close: () => void;
   notify: (message: string) => void;
   ask: (prompt: string) => void;
+  openBotChannel?: OpenBotChannel;
+  openOpenBot: (channel: OpenBotChannel) => void;
 }
 export const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 export function useWorkspace() {

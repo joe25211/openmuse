@@ -25,6 +25,7 @@ import type {
 } from "../../../../packages/domain/src/index.ts";
 import type { ActionService } from "../actions.ts";
 import type { BrowserService } from "../browser.ts";
+import type { ComposioService } from "../composio.ts";
 import { ComputerService } from "../computer.ts";
 import type { Config } from "../config.ts";
 import type { Store } from "../db.ts";
@@ -51,6 +52,7 @@ export class AgentService {
     readonly actions: ActionService,
     readonly browser: BrowserService,
     readonly computer: ComputerService = new ComputerService(db, config),
+    readonly composio?: ComposioService,
   ) {
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: (owner, task) => this.publishOutcome(owner, task),
@@ -698,12 +700,14 @@ export class AgentService {
     context: TaskContext,
   ) {
     await context.guard();
-    const connection = await this.workspace.connection(owner);
-    if (connection?.id !== task.state.connectionId)
-      throw new AppError(
-        "Google connection changed during this task. Start a new task using the current account.",
-        409,
-      );
+    if (input.kind !== "composio.execute") {
+      const connection = await this.workspace.connection(owner);
+      if (connection?.id !== task.state.connectionId)
+        throw new AppError(
+          "Google connection changed during this task. Start a new task using the current account.",
+          409,
+        );
+    }
     const proposal = await this.actions.propose(owner, input, `${task.id}:${key}`, task.id);
     if (proposal.status === "succeeded") return proposal;
     if (proposal.status !== "awaiting_review" && proposal.status !== "executing")

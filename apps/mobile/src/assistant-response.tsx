@@ -14,8 +14,8 @@ const style: Partial<MarkdownStyles> = {
   heading2: { fontSize: 19, lineHeight: 25 },
   heading3: { fontSize: 17, lineHeight: 23 },
   link: { color: colors.blueDark, textDecorationLine: "underline" },
-  codeInline: { backgroundColor: "#E2E4E7", color: colors.text },
-  codeBlock: { backgroundColor: "#E2E4E7", color: colors.text },
+  codeInline: { backgroundColor: colors.line, color: colors.text },
+  codeBlock: { backgroundColor: colors.line, color: colors.text },
 };
 const renderCodeBlock: RenderRules["fence"] = (node, _children, _parent, styles) => (
   <Text key={node.key} selectable style={styles.codeBlock as TextStyle}>

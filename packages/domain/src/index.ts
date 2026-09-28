@@ -4,6 +4,7 @@ export type WorkspaceMode = "sample" | "live";
 export type Section =
   | "today"
   | "chat"
+  | "openbot"
   | "mail"
   | "calendar"
   | "browser"
@@ -125,6 +126,28 @@ export const proposalSchema = z.discriminatedUnion("kind", [
     kind: z.literal("calendar.delete"),
     data: z.object({ calendarId: z.string(), eventId: z.string().min(1), title: z.string() }),
   }),
+  z.object({
+    kind: z.literal("composio.execute"),
+    data: z
+      .object({
+        toolkit: z
+          .string()
+          .regex(/^[a-z][a-z0-9_]*$/)
+          .max(80),
+        tool: z
+          .string()
+          .regex(/^[A-Z][A-Z0-9_]+$/)
+          .max(160),
+        args: z
+          .record(z.string(), z.unknown())
+          .refine((value) => JSON.stringify(value).length <= 16000),
+      })
+      .refine(
+        ({ toolkit, tool }) =>
+          toolkit !== "composio" && tool.startsWith(`${toolkit.toUpperCase()}_`),
+        "Choose one tool from the selected app, not a Composio meta-tool",
+      ),
+  }),
 ]);
 export type EmailDraft = z.infer<typeof emailDraftSchema>;
 export type EventDraft = z.infer<typeof eventDraftSchema>;
@@ -165,7 +188,7 @@ export interface ActivityEntry {
 export interface Connection {
   id: string;
   name: string;
-  status: "connected" | "disconnected" | "sample" | "unconfigured" | "unavailable";
+  status: "connected" | "disconnected" | "sample" | "configured" | "unconfigured" | "unavailable";
   account?: string;
   capabilities: string[];
 }

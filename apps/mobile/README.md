@@ -22,6 +22,8 @@ pnpm --dir apps/mobile android
 
 The default API is `http://localhost:8787`, or `http://10.0.2.2:8787` on the Android emulator. Set `EXPO_PUBLIC_API_URL` to your reachable server URL for a physical device or deployment. Live mode asks for the server access key; local mode opens the fictional workspace automatically. Tokens stay in memory.
 
+For a separate Android development app, set `APP_VARIANT=development` when building and starting Metro. This installs as `app.openmuse.mobile.dev`, leaving the regular app installed. The development build loads JavaScript changes from Metro; rebuild it when native dependencies or Expo app configuration change.
+
 PDFs use `react-native-pdf` and `react-native-blob-util` in an Expo **development build**. Expo Go does not include these native modules. The config plugins in `app.json` configure the native projects. Web uses the browser’s real PDF reader, with page/zoom controls and download/print access. PDF form fields save a new server artifact.
 
 ## Checks

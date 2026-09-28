@@ -42,6 +42,9 @@ export interface Config {
   intelligenceApiKey?: string;
   googleClientId?: string;
   googleClientSecret?: string;
+  composioApiKey?: string;
+  openbotEnabled?: boolean;
+  openbotBaseUrl?: string;
   googleRedirectUri: string;
   workerUrl?: string;
   workerToken?: string;
@@ -49,6 +52,7 @@ export interface Config {
   computerEnabled?: boolean;
   computerImage?: string;
   computerDeploymentId?: string;
+  computerHostDir?: string;
   allowedOrigins: string[];
 }
 
@@ -108,6 +112,9 @@ export function readConfig(): Config {
     intelligenceApiKey: required("CPK_INTELLIGENCE_API_KEY", intelligenceKeyRequiredMessage),
     googleClientId: process.env.GOOGLE_CLIENT_ID,
     googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    composioApiKey: process.env.COMPOSIO_API_KEY,
+    openbotEnabled: process.env.OPENBOT_ENABLED === "true",
+    openbotBaseUrl: process.env.OPENBOT_BASE_URL,
     googleRedirectUri: `${publicUrl}/api/google/callback`,
     workerUrl: process.env.BROWSER_WORKER_URL,
     workerToken: process.env.WORKER_TOKEN,
@@ -115,6 +122,7 @@ export function readConfig(): Config {
     computerEnabled: process.env.COMPUTER_ENABLED === "true",
     computerImage: process.env.COMPUTER_IMAGE ?? "openmuse-computer:local",
     computerDeploymentId: process.env.COMPUTER_DEPLOYMENT_ID,
+    computerHostDir: process.env.COMPUTER_HOST_DIR,
     allowedOrigins: (
       process.env.ALLOWED_ORIGINS ?? "http://localhost:8081,http://127.0.0.1:8081"
     ).split(","),

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { ActionService } from "../apps/server/src/actions.ts";
 import { createStore, type Store } from "../apps/server/src/db.ts";
-import { type ActionProposal, eventDraftSchema } from "../packages/domain/src/index.ts";
+import {
+  type ActionProposal,
+  eventDraftSchema,
+  proposalSchema,
+} from "../packages/domain/src/index.ts";
 
 function deferred<T>() {
   let resolve: (value: T) => void = () => {
@@ -160,6 +164,51 @@ test("account switching and reconnecting invalidate a prepared action", async ()
     /connection changed/i,
   );
   assert.equal(calls, 0);
+});
+
+test("Composio writes require review and stay bound to the connected app account", async () => {
+  const input = {
+    kind: "composio.execute" as const,
+    data: { toolkit: "github", tool: "GITHUB_CREATE_ISSUE", args: { title: "Fix bug" } },
+  };
+  assert.equal(
+    proposalSchema.safeParse({
+      kind: "composio.execute",
+      data: { ...input.data, toolkit: "composio", tool: "COMPOSIO_MULTI_EXECUTE_TOOL" },
+    }).success,
+    false,
+  );
+  let account = { id: "account-a", account: "GitHub · account-a" };
+  let calls = 0;
+  const service = new ActionService(db, {
+    connected: async () => {
+      throw new Error("Google connection must not be used");
+    },
+    execute: async () => {
+      throw new Error("Google adapter must not execute Composio actions");
+    },
+    composio: {
+      connection: async () => account,
+      execute: async (_owner, action, connectionId) => {
+        calls++;
+        assert.deepEqual(action, input);
+        assert.equal(connectionId, "account-a");
+        return "Composio receipt";
+      },
+    },
+  });
+  const first = await service.propose("composio-switch", input);
+  account = { id: "account-b", account: "GitHub · account-b" };
+  await assert.rejects(
+    service.decide("composio-switch", first.id, first.hash, "approve"),
+    /connection changed/i,
+  );
+  assert.equal(calls, 0);
+  account = { id: "account-a", account: "GitHub · account-a" };
+  const result = await service.decide("composio-switch", first.id, first.hash, "approve");
+  assert.equal(result.status, "succeeded");
+  await service.decide("composio-switch", first.id, first.hash, "approve");
+  assert.equal(calls, 1);
 });
 
 test("review stores authoritative calendar details and binds execution to their version", async () => {

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { posix } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, posix, resolve } from "node:path";
 import { z } from "zod";
 import type {
   ComputerCommand,
@@ -173,6 +174,7 @@ const inspectionSchema = z.object({
     z.object({
       Type: z.string(),
       Name: z.string().optional(),
+      Source: z.string().optional(),
       Destination: z.string(),
       RW: z.boolean(),
     }),
@@ -211,6 +213,24 @@ export class ComputerService {
       throw new AppError("COMPUTER_IMAGE is invalid", 503);
     return image;
   }
+  private hostDir(requireExisting = true) {
+    const dir = this.config.computerHostDir;
+    if (dir === undefined) return undefined;
+    try {
+      if (
+        isAbsolute(dir) &&
+        !dir.includes(",") &&
+        (!requireExisting || (realpathSync(dir) === resolve(dir) && statSync(dir).isDirectory()))
+      )
+        return resolve(dir);
+    } catch {
+      // Docker must never create a missing source directory for us.
+    }
+    throw new AppError(
+      "COMPUTER_HOST_DIR must be an existing absolute directory without symlinks or commas",
+      503,
+    );
+  }
   private async checked(args: string[]) {
     const result = await this.docker(args, { timeoutMs: controlTimeout });
     if (result.timedOut)
@@ -222,8 +242,9 @@ export class ComputerService {
       );
     return result.stdout;
   }
-  private async inspect(owner: string): Promise<Inspection | undefined> {
+  private async inspect(owner: string, requireHostDir = true): Promise<Inspection | undefined> {
     const identity = computerIdentity(this.config, owner);
+    const hostDir = this.hostDir(requireHostDir);
     const found = (
       await this.checked([
         "container",
@@ -279,8 +300,9 @@ export class ComputerService {
       Object.keys(h.Tmpfs ?? {}).length === 1 &&
       h.Tmpfs?.["/tmp"] === "rw,nosuid,nodev,noexec,size=67108864,mode=1777" &&
       c.Mounts.length === 1 &&
-      c.Mounts[0].Type === "volume" &&
-      c.Mounts[0].Name === identity.volume &&
+      (hostDir
+        ? c.Mounts[0].Type === "bind" && c.Mounts[0].Source === hostDir
+        : c.Mounts[0].Type === "volume" && c.Mounts[0].Name === identity.volume) &&
       c.Mounts[0].Destination === "/workspace" &&
       c.Mounts[0].RW &&
       Object.keys(c.NetworkSettings.Networks).every((network) => network === "none");
@@ -289,7 +311,7 @@ export class ComputerService {
         "Computer ownership or isolation does not match this deployment; refusing to attach",
         409,
       );
-    await this.verifyVolume(owner);
+    if (!hostDir) await this.verifyVolume(owner);
     return c;
   }
   private async verifyVolume(owner: string) {
@@ -441,6 +463,7 @@ export class ComputerService {
   async start(owner: string) {
     await this.exclusive(owner, async () => {
       const identity = computerIdentity(this.config, owner);
+      const hostDir = this.hostDir();
       const existing = await this.inspect(owner);
       if (existing) {
         if (!existing.State.Running) await this.checked(["container", "start", identity.container]);
@@ -450,18 +473,20 @@ export class ComputerService {
         "--label",
         `${key}=${value}`,
       ]);
-      const volume = (
-        await this.checked([
-          "volume",
-          "ls",
-          "--filter",
-          `name=^${identity.volume}$`,
-          "--format",
-          "{{.Name}}",
-        ])
-      ).trim();
-      if (!volume) await this.checked(["volume", "create", ...labels, identity.volume]);
-      await this.verifyVolume(owner);
+      if (!hostDir) {
+        const volume = (
+          await this.checked([
+            "volume",
+            "ls",
+            "--filter",
+            `name=^${identity.volume}$`,
+            "--format",
+            "{{.Name}}",
+          ])
+        ).trim();
+        if (!volume) await this.checked(["volume", "create", ...labels, identity.volume]);
+        await this.verifyVolume(owner);
+      }
       await this.checked([
         "container",
         "create",
@@ -496,7 +521,9 @@ export class ComputerService {
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,noexec,size=67108864,mode=1777",
         "--mount",
-        `type=volume,source=${identity.volume},target=/workspace`,
+        hostDir
+          ? `type=bind,source=${hostDir},target=/workspace`
+          : `type=volume,source=${identity.volume},target=/workspace`,
         "--env",
         "HOME=/workspace",
         "--env",
@@ -552,7 +579,7 @@ export class ComputerService {
               stderr: "Stopped by the user. Inspect the workspace before repeating this command.",
             },
           );
-      if ((await this.inspect(owner))?.State.Running)
+      if ((await this.inspect(owner, false))?.State.Running)
         await this.checked([
           "container",
           "stop",
