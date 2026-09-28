@@ -82,7 +82,8 @@
     .c-task { max-width:600px; margin:auto; }
     .c-task h2 { font-size:25px; line-height:1.18; color:#ddd; margin:8px 0 12px; }
     .c-task .card { margin:18px 0; }
-    .variant-C #stage { touch-action:pan-y; overscroll-behavior-x:contain; }
+    .variant-C #stage { touch-action:pan-y; overscroll-behavior-x:contain; cursor:grab; }
+    .variant-C #stage:active { cursor:grabbing; }
     .timeline { list-style:none; padding:0; margin:16px 0; }
     .timeline li { border-left:2px solid var(--line); padding:0 0 17px 15px; color:var(--muted); font-size:13px; }
     .timeline li:last-child { padding-bottom:0; }
@@ -121,7 +122,7 @@
       <button type="button" data-mock aria-label="Notifications">♢</button>
     </header>
     <div class="preview">
-      <div><strong>Prototype · issue 6</strong><br><span>Mock task and Bot; no live handoff.</span></div>
+      <div><strong>Prototype · issue 6</strong><br><span>Mock task and Bot. In C, drag across the content or use ← / → to switch Chat and Task.</span></div>
       <div class="controls">
         <label for="state">Preview state</label>
         <select id="state"><option value="running">Running</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="needs-input">Needs input</option></select>
@@ -222,6 +223,7 @@
     }
     const stage = document.getElementById("stage");
     let touchStart = null;
+    let mouseStart = null;
     let wheelX = 0;
     let wheelReset;
     stage.addEventListener("touchstart", event => {
@@ -237,6 +239,19 @@
       if (next && next !== pane) { pane = next; render(); }
     }, { passive: true });
     stage.addEventListener("touchcancel", () => { touchStart = null; });
+    stage.addEventListener("mousedown", event => {
+      if (variant !== "C" || event.button !== 0 || event.target.closest("button, a, input, textarea, select")) return;
+      mouseStart = [event.clientX, event.clientY];
+      event.preventDefault();
+    });
+    document.addEventListener("mouseup", event => {
+      if (!mouseStart) return;
+      const [x, y] = mouseStart;
+      mouseStart = null;
+      if (variant !== "C") return;
+      const next = swipePane(event.clientX - x, event.clientY - y);
+      if (next && next !== pane) { pane = next; render(); }
+    });
     stage.addEventListener("wheel", event => {
       if (variant !== "C" || Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
       event.preventDefault();
@@ -260,7 +275,14 @@
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       if (document.getElementById("task-dialog").open) return;
       if (event.target.closest("input, textarea, select, [contenteditable]")) return;
-      event.preventDefault(); changeVariant(event.key === "ArrowRight" ? 1 : -1);
+      if (event.target.closest("button") && !event.target.closest(".c-tabs, .switcher")) return;
+      event.preventDefault();
+      if (variant === "C" && !event.target.closest(".switcher")) {
+        const focusedTab = event.target.closest(".c-tabs");
+        pane = event.key === "ArrowRight" ? "task" : "chat";
+        render();
+        if (focusedTab) stage.querySelector(`[data-pane="${pane}"]`).focus();
+      } else changeVariant(event.key === "ArrowRight" ? 1 : -1);
     });
     render();
     console.assert(["A", "B", "C"].every(key => variants[key]) && ["running", "completed", "failed", "needs-input"].every(key => stateData[key]), "Prototype variant/state matrix is incomplete");
