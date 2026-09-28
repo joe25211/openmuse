@@ -175,7 +175,12 @@ export interface ActionProposal {
   createdAt: string;
   expiresAt: string;
   result?: string;
-  error?: string;
+  error?: string | null;
+  reconciliation?: {
+    outcome: "completed" | "not_completed";
+    note: string;
+    confirmedAt: string;
+  };
 }
 export interface ActivityEntry {
   id: string;

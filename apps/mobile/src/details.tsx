@@ -538,6 +538,7 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
   const [local, setLocal] = useState(initial);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [verificationNote, setVerificationNote] = useState("");
   const action =
     local.status !== initial.status ? local : w.actions.find((a) => a.id === initial.id) || local;
   const d = action.data;
@@ -549,6 +550,23 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
       const result = await api.request<ActionProposal>(`/api/actions/${action.id}/decide`, {
         decision,
         hash: action.hash,
+      });
+      setLocal(result);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function reconcile(outcome: "completed" | "not_completed") {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.request<ActionProposal>(`/api/actions/${action.id}/reconcile`, {
+        hash: action.hash,
+        outcome,
+        note: verificationNote.trim(),
       });
       setLocal(result);
       await refresh();
@@ -684,7 +702,57 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
           </>
         )}
       </Card>
-      <ErrorNotice error={error || action.error} />
+      <ErrorNotice error={error || action.error || ""} />
+      {action.status === "outcome_unknown" && (
+        <Card style={{ gap: 13, marginTop: 16 }}>
+          <Text style={s.heading}>Check the connected app</Text>
+          <Text style={s.text}>
+            This action may have changed your account. Verify the exact account and details above
+            before recording what happened. Neither choice runs the action again.
+          </Text>
+          <Field
+            label="What did you verify?"
+            value={verificationNote}
+            onChangeText={setVerificationNote}
+            placeholder="Where you checked and what you found"
+            maxLength={1000}
+            multiline
+          />
+          <View style={[s.row, { gap: 10, flexWrap: "wrap" }]}>
+            <Button
+              primary
+              icon={Check}
+              busy={busy}
+              disabled={verificationNote.trim().length < 8}
+              onPress={() => void reconcile("completed")}
+            >
+              I confirmed it completed
+            </Button>
+            <Button
+              icon={X}
+              disabled={busy || verificationNote.trim().length < 8}
+              onPress={() => void reconcile("not_completed")}
+            >
+              I confirmed it did not complete
+            </Button>
+          </View>
+        </Card>
+      )}
+      {action.reconciliation && (
+        <Card style={{ gap: 8, marginTop: 16 }}>
+          <Text style={s.heading}>Verified by you</Text>
+          <Text selectable style={s.text}>
+            {action.reconciliation.note}
+          </Text>
+          <Text style={s.small}>
+            {action.reconciliation.outcome === "completed"
+              ? action.taskId
+                ? "This action will not run again. Open the linked task to continue or review its result."
+                : "This action will not run again."
+              : "This action will not run again. Start a new task if you still want the change."}
+          </Text>
+        </Card>
+      )}
       {!!action.result && (
         <Card style={{ marginTop: 16, backgroundColor: colors.green, padding: 18 }}>
           <Text selectable style={s.text}>
@@ -727,9 +795,18 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
           </View>
         </>
       ) : (
-        <Button style={{ alignSelf: "flex-start", marginTop: 19 }} onPress={close}>
-          Done
-        </Button>
+        <View style={[s.row, { gap: 10, marginTop: 19, flexWrap: "wrap" }]}>
+          {action.taskId && action.status !== "outcome_unknown" && (
+            <Button
+              onPress={() => {
+                if (action.taskId) open({ type: "task", taskId: action.taskId });
+              }}
+            >
+              View linked task
+            </Button>
+          )}
+          <Button onPress={close}>Done</Button>
+        </View>
       )}
     </Sheet>
   );

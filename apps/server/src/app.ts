@@ -262,6 +262,24 @@ export async function createApp(
       await actions.decide(c.get("owner"), c.req.param("id"), body.hash, body.decision),
     );
   });
+  app.post("/api/actions/:id/reconcile", async (c) => {
+    const body = z
+      .object({
+        hash: z.string().length(64),
+        outcome: z.enum(["completed", "not_completed"]),
+        note: z.string().trim().min(8).max(1000),
+      })
+      .parse(await c.req.json());
+    return c.json(
+      await actions.reconcile(
+        c.get("owner"),
+        c.req.param("id"),
+        body.hash,
+        body.outcome,
+        body.note,
+      ),
+    );
+  });
   app.get("/api/drafts", async (c) => c.json(await db.list(c.get("owner"), "drafts")));
   app.post("/api/drafts", async (c) => {
     const body = emailDraftSchema.extend({ id: z.string().optional() }).parse(await c.req.json());

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { AgentTask } from "../../../packages/domain/src/agent.ts";
 import {
   type ActionProposal,
   type CalendarEvent,
@@ -210,9 +211,89 @@ export class ActionService {
         error: error instanceof Error ? error.message : "Execution failed",
       };
     }
-    await this.db.put(owner, "actions", finished);
-    await this.record(owner, finished, finished.result ?? finished.error ?? finished.status);
-    return finished;
+    const saved = await this.db.compareAndSwap<ActionProposal>(
+      owner,
+      "actions",
+      id,
+      { status: "executing", hash: claimed.hash },
+      {
+        status: finished.status,
+        ...(finished.result ? { result: finished.result } : {}),
+        ...(finished.error ? { error: finished.error } : {}),
+      },
+    );
+    if (!saved) {
+      const current = await this.db.get<ActionProposal>(owner, "actions", id);
+      if (!current) throw new AppError("Action not found", 404);
+      return current;
+    }
+    await this.record(owner, saved, saved.result ?? saved.error ?? saved.status);
+    return saved;
+  }
+  async reconcile(
+    owner: string,
+    id: string,
+    hash: string,
+    outcome: "completed" | "not_completed",
+    note: string,
+  ): Promise<ActionProposal> {
+    const verifiedNote = note.trim();
+    if (verifiedNote.length < 8 || verifiedNote.length > 1000)
+      throw new AppError("Describe what you verified in 8 to 1000 characters", 422);
+    const action = await this.db.get<ActionProposal>(owner, "actions", id);
+    if (!action) throw new AppError("Action not found", 404);
+    if (action.hash !== hash)
+      throw new AppError("This proposal changed. Open its latest review before deciding.", 409);
+    const confirmedAt = new Date(this.now()).toISOString();
+    const completed = outcome === "completed";
+    if (
+      action.status !== "outcome_unknown" &&
+      (action.reconciliation?.outcome !== outcome || action.reconciliation.note !== verifiedNote)
+    )
+      throw new AppError("Only an action with an unknown outcome can be reconciled", 409);
+    const resolved =
+      action.status === "outcome_unknown"
+        ? await this.db.compareAndSwap<ActionProposal>(
+            owner,
+            "actions",
+            id,
+            { status: "outcome_unknown", hash },
+            {
+              status: completed ? "succeeded" : "failed",
+              ...(completed
+                ? { result: "You confirmed this action completed in the connected app." }
+                : {}),
+              error: completed
+                ? null
+                : "You confirmed this action did not complete. Start a new task if you still want this change.",
+              reconciliation: { outcome, note: verifiedNote, confirmedAt },
+            },
+          )
+        : action;
+    if (!resolved) throw new AppError("Action changed; refresh before reconciling", 409);
+    if (resolved.taskId) {
+      const task = await this.db.get<AgentTask>(owner, "tasks", resolved.taskId);
+      if (task?.actionId === id && (task.status === "paused" || task.status === "waiting_approval"))
+        await this.db.compareAndSwap<AgentTask>(
+          owner,
+          "tasks",
+          task.id,
+          { actionId: id, status: task.status, leaseId: task.leaseId ?? null },
+          {
+            ...(completed ? {} : { status: "failed" }),
+            error: completed ? null : resolved.error,
+            state: { ...task.state, notice: null },
+            updatedAt: confirmedAt,
+          },
+        );
+    }
+    if (action.status === "outcome_unknown")
+      await this.record(
+        owner,
+        resolved,
+        `You confirmed ${completed ? "completed" : "not completed"}: ${verifiedNote}`,
+      );
+    return resolved;
   }
   private async record(owner: string, action: ActionProposal, detail: string) {
     await this.db.put(owner, "activity", {

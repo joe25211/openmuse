@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { ActionService } from "../apps/server/src/actions.ts";
 import { createStore, type Store } from "../apps/server/src/db.ts";
+import type { AgentTask } from "../packages/domain/src/agent.ts";
 import {
   type ActionProposal,
   eventDraftSchema,
@@ -122,6 +123,119 @@ test("uncertain writes retain uncertainty and cannot be retried", async () => {
   assert.equal(result.status, "outcome_unknown");
   await service.decide("uncertain-user", proposal.id, proposal.hash, "approve");
   assert.equal(calls, 1);
+});
+test("a verified outcome records the user's evidence and safely settles a linked task", async () => {
+  let calls = 0;
+  const service = new ActionService(db, {
+    execute: async () => {
+      calls++;
+      return "sent";
+    },
+    connected: async () => true,
+  });
+  for (const outcome of ["completed", "not_completed"] as const) {
+    const owner = `reconcile-${outcome}`;
+    const taskId = `task-${outcome}`;
+    const action = await service.propose(owner, email, undefined, taskId);
+    await db.compareAndSwap(
+      owner,
+      "actions",
+      action.id,
+      { status: "awaiting_review" },
+      {
+        status: "outcome_unknown",
+        error: "Provider response lost",
+      },
+    );
+    await db.put<AgentTask>(owner, "tasks", {
+      id: taskId,
+      title: "Send email",
+      prompt: "Send email",
+      kind: "document",
+      status: "paused",
+      actionId: action.id,
+      plan: [],
+      evidence: [],
+      input: {},
+      state: { notice: { title: "Unknown" } },
+      createdAt: action.createdAt,
+      updatedAt: action.createdAt,
+      attempts: 1,
+      leaseId: null,
+      leaseUntil: null,
+      artifactIds: [],
+    });
+    const note = `Checked ${outcome} in the connected account`;
+    await assert.rejects(
+      service.reconcile(owner, action.id, "wrong-hash", outcome, note),
+      /changed/i,
+    );
+    await assert.rejects(
+      service.reconcile("other-owner", action.id, action.hash, outcome, note),
+      /not found/i,
+    );
+    const resolved = await service.reconcile(owner, action.id, action.hash, outcome, note);
+    assert.equal(resolved.status, outcome === "completed" ? "succeeded" : "failed");
+    assert.deepEqual(resolved.reconciliation?.outcome, outcome);
+    assert.equal(resolved.reconciliation?.note, note);
+    assert.ok(resolved.reconciliation?.confirmedAt);
+    assert.equal(calls, 0);
+    const task = await db.get<AgentTask>(owner, "tasks", taskId);
+    assert.equal(task?.status, outcome === "completed" ? "paused" : "failed");
+    assert.equal(task?.state.notice, null);
+    assert.equal(
+      (await db.list<{ detail: string }>(owner, "activity"))[0]?.detail,
+      `You confirmed ${outcome === "completed" ? "completed" : "not completed"}: ${note}`,
+    );
+    assert.deepEqual(
+      await service.reconcile(owner, action.id, action.hash, outcome, note),
+      resolved,
+    );
+    assert.equal((await db.list(owner, "activity")).length, 2);
+    await assert.rejects(
+      service.reconcile(owner, action.id, action.hash, outcome, `${note} again`),
+      /unknown outcome/i,
+    );
+    assert.equal(calls, 0);
+  }
+});
+test("late provider results cannot overwrite either reconciled outcome", async () => {
+  for (const outcome of ["completed", "not_completed"] as const) {
+    const owner = `late-${outcome}`;
+    const started = deferred<void>();
+    const finish = deferred<string>();
+    const service = new ActionService(db, {
+      execute: async () => {
+        started.resolve();
+        return finish.promise;
+      },
+      connected: async () => true,
+    });
+    const action = await service.propose(owner, email);
+    const approving = service.decide(owner, action.id, action.hash, "approve");
+    await started.promise;
+    await db.compareAndSwap(
+      owner,
+      "actions",
+      action.id,
+      { status: "executing" },
+      {
+        status: "outcome_unknown",
+        error: "Server restarted before confirmation",
+      },
+    );
+    const resolved = await service.reconcile(
+      owner,
+      action.id,
+      action.hash,
+      outcome,
+      "Checked provider records",
+    );
+    finish.resolve("late provider receipt");
+    const returned = await approving;
+    assert.deepEqual(returned, resolved);
+    assert.deepEqual(await db.get<ActionProposal>(owner, "actions", action.id), resolved);
+  }
 });
 test("another service instance sees persisted proposals", async () => {
   const options = { execute: async () => "created", connected: async () => true };
