@@ -276,6 +276,7 @@ test("named Bot routing uses scoped reads when verified and a safe excerpt other
   assert.equal(scoped.eligibilityChecks, 2);
   assert.equal(directTask.delegation?.readMode, "direct");
   assert.match(directTask.delegation?.sentContext ?? "", /Resource ID: /);
+  assert.doesNotMatch(directTask.delegation?.sentContext ?? "", /garden\.txt/);
   assert.doesNotMatch(directTask.delegation?.sentContext ?? "", /garden roses need sunlight/);
   assert.match(directTask.delegation?.fallbackExcerpt ?? "", /garden roses need sunlight/);
   assert.doesNotMatch(

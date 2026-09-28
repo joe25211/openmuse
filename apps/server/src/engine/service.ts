@@ -55,7 +55,7 @@ const redact = (text: string) =>
     .replace(/\b(?:api[_-]?key|token|cookie|password|secret)\s*[:=]\s*\S+/gi, "[redacted]");
 
 const unsafeExcerptLine = (line: string) =>
-  /(?:secret|token|cookie|password|credential|(?:api|private|access)[\s_-]?key|bearer|\bAuthorization\s*:|\bBasic\s+[A-Za-z0-9+/=]{12,}|https?:\/\/[^\s/]*@|-----BEGIN)/i.test(
+  /(?:^|[^a-z])(?:secret|token|cookie|password|credential|bearer)(?:$|[^a-z])|(?:api|private|access)[\s_-]?key|\bAuthorization\s*:|\bBasic\s+[A-Za-z0-9+/=]{12,}|https?:\/\/[^\s/]*@|-----BEGIN/i.test(
     line,
   );
 
@@ -151,11 +151,11 @@ function sentContext(input: {
     ...(input.brief?.trim() ? [`Relevant brief: ${redact(input.brief.trim())}`] : []),
     ...(input.sourcePath
       ? [
-          `Named resource: ${input.sourcePath} (${input.mode === "direct" ? "read-only direct access" : input.mode === "supplied" ? "user-supplied content" : "excerpt only"})`,
+          `Named resource: local text reference (${input.mode === "direct" ? "read-only direct access" : input.mode === "supplied" ? "user-supplied content" : "excerpt only"})`,
         ]
       : []),
     ...(input.mode === "direct" && input.resourcePath
-      ? [`Resource ID: ${input.resourcePath}`]
+      ? [`Resource ID: ${hash(input.resourcePath).slice(0, 16)}`]
       : []),
     ...(input.excerpt ? [`Included excerpt:\n${input.excerpt}`] : []),
     `Conversation ID: ${input.conversationId}`,
@@ -406,8 +406,6 @@ export class AgentService {
     const existing = await this.db.get<AgentTask>(owner, "tasks", id);
     const safePrompt = redact(input.prompt.trim());
     const safeBrief = input.brief ? redact(input.brief.trim()) : undefined;
-    if (input.sourcePath && unsafeExcerptLine(input.sourcePath))
-      throw new AppError("This named resource cannot be sent safely; supply its text", 422);
     const resourcePath = input.sourcePath
       ? `${hash(owner).slice(0, 24)}/${input.sourcePath}`
       : undefined;
@@ -421,10 +419,6 @@ export class AgentService {
       ? safeIncludedText(relevantExcerpt(sourceText, `${safePrompt} ${safeBrief ?? ""}`))
       : undefined;
     const fallbackExcerpt = sourceExcerpt || safeIncludedText(input.suppliedText?.trim());
-    if (input.suppliedText && !fallbackExcerpt)
-      throw new AppError("No safe supplied text was found; remove credentials and try again", 422);
-    if (input.sourcePath && !fallbackExcerpt)
-      throw new AppError("No relevant excerpt was found; supply the text to include", 422);
     const mode =
       input.sourcePath &&
       sourceText &&
@@ -463,6 +457,10 @@ export class AgentService {
         throw new AppError("This request already has a different task", 409);
       return existing;
     }
+    if (input.suppliedText && !fallbackExcerpt)
+      throw new AppError("No safe supplied text was found; remove credentials and try again", 422);
+    if (input.sourcePath && !fallbackExcerpt)
+      throw new AppError("No relevant excerpt was found; supply the text to include", 422);
     if (!this.openbot) throw new AppError("OpenBot is unavailable", 503);
     const bot = await this.openbot.eligibleBot(input.botId);
     if (
@@ -1205,14 +1203,6 @@ export class AgentService {
     };
     if (!delegation.submissionAttempted) {
       const safeExcerpt = safeIncludedText(delegation.fallbackExcerpt);
-      if (delegation.sourcePath && unsafeExcerptLine(delegation.sourcePath)) {
-        if (delegation.channelAttempted && !delegation.threadId) return pending(true);
-        return {
-          status: "failed",
-          error: "This named resource cannot be sent safely; supply its text",
-          delegation,
-        };
-      }
       const safeContext = sentContext({
         prompt: task.prompt,
         brief: delegation.brief,

@@ -205,15 +205,39 @@ test("named resource fallback sends only relevant authorized lines and user supp
     );
     const credentialFilename = "Authorization: Basic Zm9vYmFy.txt";
     await writeFile(join(ownerPath, credentialFilename), "garden roses from unsafe filename");
+    const credentialPath = await f.request("conversation-1", {
+      ...input,
+      requestId: "credential-filename",
+      sourcePath: credentialFilename,
+    });
+    assert.equal(credentialPath.status, 201);
+    assert.doesNotMatch(
+      ((await credentialPath.json()) as AgentTask).delegation?.sentContext ?? "",
+      /Zm9vYmFy|Authorization/,
+    );
+    const bareTokenFilename = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ12345.txt";
+    await writeFile(join(ownerPath, bareTokenFilename), "garden roses from a file");
+    const bareTokenPath = await f.request("conversation-1", {
+      ...input,
+      requestId: "bare-token-filename",
+      sourcePath: bareTokenFilename,
+    });
+    assert.equal(bareTokenPath.status, 201);
+    assert.doesNotMatch(
+      ((await bareTokenPath.json()) as AgentTask).delegation?.sentContext ?? "",
+      /ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ12345/,
+    );
+    const safeNamedPath = "tokenization-notes.txt";
+    await writeFile(join(ownerPath, safeNamedPath), "garden roses from tokenization notes");
     assert.equal(
       (
         await f.request("conversation-1", {
           ...input,
-          requestId: "credential-filename",
-          sourcePath: credentialFilename,
+          requestId: "safe-named-path",
+          sourcePath: safeNamedPath,
         })
       ).status,
-      422,
+      201,
     );
     await writeFile(
       join(ownerPath, "unsafe.txt"),
@@ -317,13 +341,14 @@ test("a saved pre-fix excerpt is sanitized before its first submission", async (
     });
     const gateway = f.server.agent.openbot;
     assert(gateway);
+    const expectedRunIds = new Set([task.delegation.runId]);
     const run = t.mock.method(
       gateway,
       "runText",
       async (_botId: string, _threadId: string, runId: string, text: string) => {
-        assert.equal(runId, task.delegation?.runId);
-        assert.match(text, /safe garden notes/);
-        assert.doesNotMatch(text, /QmFzaWNBdXRoMTIz/);
+        assert(expectedRunIds.has(runId));
+        assert.match(text, /safe garden notes|safe original text/);
+        assert.doesNotMatch(text, /QmFzaWNBdXRoMTIz|VW5zYWZlQXV0aA==/);
         return { terminal: "finished" as const, messageIds: ["answer-1"] };
       },
     );
@@ -354,6 +379,14 @@ test("a saved pre-fix excerpt is sanitized before its first submission", async (
     await f.server.agent.worker.tick();
     assert.equal(run.mock.callCount(), 1);
     assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", unsafeOnly.id))?.status, "failed");
+    const legacyRetry = await f.request("conversation-1", {
+      requestId: "saved-unsafe-only",
+      botId: "bot-1",
+      prompt: "Summarize garden notes",
+      suppliedText: "garden Authorization: Basic VW5zYWZlQXV0aA==",
+    });
+    assert.equal(legacyRetry.status, 201);
+    assert.equal(((await legacyRetry.json()) as AgentTask).id, unsafeOnly.id);
     const uncertain = await f.request("conversation-1", {
       requestId: "saved-unsafe-channel",
       botId: "bot-1",
@@ -384,6 +417,7 @@ test("a saved pre-fix excerpt is sanitized before its first submission", async (
     });
     const pathTask = (await oldPath.json()) as AgentTask;
     assert(pathTask.delegation);
+    expectedRunIds.add(pathTask.delegation.runId);
     await f.db.put(f.owner, "tasks", {
       ...pathTask,
       delegation: {
@@ -393,8 +427,10 @@ test("a saved pre-fix excerpt is sanitized before its first submission", async (
       },
     });
     await f.server.agent.worker.tick();
-    assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", pathTask.id))?.status, "failed");
-    assert.equal(run.mock.callCount(), 1);
+    const migratedPath = await f.db.get<AgentTask>(f.owner, "tasks", pathTask.id);
+    assert.equal(migratedPath?.status, "succeeded");
+    assert.doesNotMatch(migratedPath?.delegation?.sentContext ?? "", /VW5zYWZlQXV0aA==/);
+    assert.equal(run.mock.callCount(), 2);
   } finally {
     await f.close();
   }
