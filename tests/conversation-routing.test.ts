@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -14,10 +16,40 @@ import { modelFixture } from "./helpers/model.ts";
 
 type Bot = { id: string; name: string; title?: string; hidden?: boolean; endpoint?: string | null };
 
-async function fixture(t: TestContext, calls: ({ name: string; arguments: object } | undefined)[]) {
+async function fixture(
+  t: TestContext,
+  calls: ({ name: string; arguments: object } | undefined)[],
+  scopedReads?: boolean,
+) {
   const { requests } = await modelFixture(t, (index) => calls[index]);
   const directory = await mkdtemp(join(tmpdir(), "openmuse-routing-"));
   const db = await createStore({ dataDir: join(directory, "db") });
+  let eligibilityChecks = 0;
+  const openbot =
+    scopedReads !== undefined
+      ? createServer((request, response) => {
+          response.setHeader("Content-Type", "application/json");
+          if (request.url === "/api/agents")
+            response.end(
+              JSON.stringify({
+                agents: [{ id: "writer", name: "Research Writer", endpoint: null }],
+              }),
+            );
+          else if (request.url === "/api/plugins/for/writer") {
+            eligibilityChecks++;
+            response.end(JSON.stringify({ tools: [], skills: [] }));
+          } else if (request.url === "/api/host-access") {
+            eligibilityChecks++;
+            response.end(JSON.stringify({ grants: [], pending: [], connected: false }));
+          } else if (request.url === "/api/openmuse/scoped-runs") response.end("{}");
+          else response.writeHead(404).end("{}");
+        })
+      : undefined;
+  if (openbot) {
+    openbot.listen(0, "127.0.0.1");
+    await once(openbot, "listening");
+  }
+  const address = openbot?.address();
   const config: Config = {
     mode: "sample",
     port: 8787,
@@ -29,6 +61,19 @@ async function fixture(t: TestContext, calls: ({ name: string; arguments: object
     intelligenceApiKey: "test-only",
     googleRedirectUri: "http://127.0.0.1:8787/api/google/callback",
     allowedOrigins: [],
+    ...(address && typeof address !== "string"
+      ? {
+          openbotEnabled: true,
+          openbotBaseUrl: `http://127.0.0.1:${address.port}`,
+          openbotScopedReadRoot: directory,
+          ...(scopedReads === true
+            ? {
+                openbotScopedReadToken: "scoped-bearer",
+                openbotScopedReadSigningKey: "test-signing-key-that-is-at-least-32-bytes",
+              }
+            : {}),
+        }
+      : {}),
   };
   const server = await createApp(db, config);
   await server.agent.stop();
@@ -38,14 +83,23 @@ async function fixture(t: TestContext, calls: ({ name: string; arguments: object
     await server.agent.stop();
     await db.close();
     await rm(directory, { recursive: true, force: true });
+    if (openbot) {
+      const closed = once(openbot, "close");
+      openbot.close();
+      await closed;
+    }
   });
   const gateway = server.agent.openbot;
   assert.ok(gateway);
   return {
     ...server,
     db,
+    directory,
     requests,
     gateway,
+    get eligibilityChecks() {
+      return eligibilityChecks;
+    },
     conversation: new ConversationAgent(config, server.agent, "local-user"),
     input(text: string): RunAgentInput {
       return {
@@ -182,4 +236,68 @@ test("named unavailable Bots are not substituted and grants are rechecked at han
   assert.equal(staleEvents.at(-1)?.type, EventType.RUN_FINISHED);
   assert.equal((await chat.db.list("local-user", "tasks")).length, 0);
   assert.equal(checks, 3);
+});
+
+test("named Bot routing uses scoped reads when verified and a safe excerpt otherwise", async (t) => {
+  const calls = [
+    {
+      name: "delegate_to_bot",
+      arguments: {
+        botId: "writer",
+        prompt: "Summarize garden roses",
+        sourcePath: "garden.txt",
+      },
+    },
+    undefined,
+  ];
+  const scoped = await fixture(t, calls, true);
+  const source = [
+    "garden roses need sunlight",
+    "garden roses PRIVATE_KEY=RELEVANT_SECRET_SENTINEL need shade",
+    "unrelated PRIVATE_SENTINEL_COOKIE=keep-out",
+    "garden roses need water",
+  ].join("\n");
+  async function addNamedSource(chat: Awaited<ReturnType<typeof fixture>>) {
+    const ownerPath = join(
+      chat.directory,
+      createHash("sha256").update("local-user").digest("hex").slice(0, 24),
+    );
+    await mkdir(ownerPath);
+    await writeFile(join(ownerPath, "garden.txt"), source);
+  }
+  await addNamedSource(scoped);
+  await run(scoped, "Use Research Writer to summarize garden roses from garden.txt");
+  const directTask = (
+    await scoped.db.list<{
+      delegation?: { readMode?: string; sentContext: string; fallbackExcerpt?: string };
+    }>("local-user", "tasks")
+  )[0];
+  assert.ok(directTask);
+  assert.equal(scoped.eligibilityChecks, 2);
+  assert.equal(directTask.delegation?.readMode, "direct");
+  assert.match(directTask.delegation?.sentContext ?? "", /Resource ID: /);
+  assert.doesNotMatch(directTask.delegation?.sentContext ?? "", /garden roses need sunlight/);
+  assert.match(directTask.delegation?.fallbackExcerpt ?? "", /garden roses need sunlight/);
+  assert.doesNotMatch(
+    directTask.delegation?.fallbackExcerpt ?? "",
+    /PRIVATE_SENTINEL|RELEVANT_SECRET_SENTINEL/,
+  );
+
+  const fallback = await fixture(t, calls, false);
+  await addNamedSource(fallback);
+  await run(fallback, "Use Research Writer to summarize garden roses from garden.txt");
+  const excerptTask = (
+    await fallback.db.list<{ delegation?: { readMode?: string; sentContext: string } }>(
+      "local-user",
+      "tasks",
+    )
+  )[0];
+  assert.ok(excerptTask);
+  assert.equal(excerptTask.delegation?.readMode, "excerpt");
+  assert.match(excerptTask.delegation?.sentContext ?? "", /garden roses need sunlight/);
+  assert.match(excerptTask.delegation?.sentContext ?? "", /garden roses need water/);
+  assert.doesNotMatch(
+    excerptTask.delegation?.sentContext ?? "",
+    /PRIVATE_SENTINEL|RELEVANT_SECRET_SENTINEL/,
+  );
 });
