@@ -63,6 +63,7 @@ export function FileThreadCard({ file }: { file: Artifact }) {
 export function TaskThreadCard({ task }: { task: AgentTask }) {
   const { api } = useWorkspace();
   const [detail, setDetail] = useState<{
+    task: AgentTask;
     artifacts: AgentArtifact[];
     files: Artifact[];
     browsers: BrowserSession[];
@@ -72,9 +73,12 @@ export function TaskThreadCard({ task }: { task: AgentTask }) {
   useEffect(() => {
     let active = true;
     void api
-      .request<{ artifacts: AgentArtifact[]; files: Artifact[]; browsers: BrowserSession[] }>(
-        `/api/agent/tasks/${task.id}`,
-      )
+      .request<{
+        task: AgentTask;
+        artifacts: AgentArtifact[];
+        files: Artifact[];
+        browsers: BrowserSession[];
+      }>(`/api/agent/tasks/${task.id}`)
       .then((result) => {
         if (active) {
           setDetail(result);
@@ -90,7 +94,7 @@ export function TaskThreadCard({ task }: { task: AgentTask }) {
   }, [api, task.id, task.updatedAt, attempt]);
   return (
     <View style={{ gap: 12 }}>
-      <TaskCard task={task} compact />
+      <TaskCard task={detail?.task ?? task} compact />
       {detail?.browsers.map((browser) => (
         <BrowserThreadCard key={browser.id} browser={browser} />
       ))}

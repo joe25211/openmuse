@@ -9,7 +9,23 @@ export type TaskStatus =
   | "paused"
   | "succeeded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "outcome_unknown";
+export interface TaskDelegation {
+  conversationId: string;
+  requestId: string;
+  botId: string;
+  botName: string;
+  sentContext: string;
+  runId: string;
+  channelAttempted: boolean;
+  channelId?: string;
+  threadId?: string;
+  submissionAttempted: boolean;
+  startupAcknowledged?: boolean;
+  terminal?: "finished" | "error";
+  output?: string;
+}
 export interface Evidence {
   id: string;
   kind: "mail" | "file" | "web" | "user";
@@ -27,7 +43,8 @@ export interface AgentTask {
   id: string;
   title: string;
   prompt: string;
-  kind: "agent" | "document" | "monitor" | "finance" | "plan";
+  kind: "agent" | "document" | "monitor" | "finance" | "plan" | "openbot";
+  delegation?: TaskDelegation;
   status: TaskStatus;
   goalId?: string;
   plan: TaskStep[];

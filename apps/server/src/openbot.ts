@@ -10,6 +10,7 @@ const agentsSchema = z.object({
       name: z.string().min(1),
       title: z.string().optional(),
       hidden: z.boolean().optional(),
+      endpoint: z.string().nullable().optional(),
     }),
   ),
 });
@@ -51,7 +52,8 @@ export class OpenBotGateway {
       enabled: config.openbotEnabled,
       transport: base
         ? {
-            runtimeUrl: `${config.publicUrl}/api/openbot/copilotkit`,
+            runtimeUrl: new URL("/api/copilotkit", base).toString(),
+            socketUrl: new URL("/socket", base).toString().replace(/^http/, "ws"),
             request: (path, init) => fetch(new URL(path, base), { ...init, redirect: "error" }),
           }
         : undefined,
@@ -72,6 +74,46 @@ export class OpenBotGateway {
   async agents() {
     const { agents } = await this.json("/api/agents", agentsSchema);
     return { agents: agents.filter((agent) => !agent.hidden) };
+  }
+
+  async eligibleBot(botId: string) {
+    const matches = (await this.agents()).agents.filter(
+      (agent) => agent.id === botId || agent.name.toLowerCase() === botId.toLowerCase(),
+    );
+    const bot = matches.length === 1 ? matches[0] : undefined;
+    if (!bot) throw new AppError("The named Bot is unavailable or ambiguous", 404);
+    if (bot.endpoint !== null)
+      throw new AppError("The named Bot's external endpoint cannot be verified as tool-free", 409);
+    try {
+      if (!(await this.adapter.hasNoEffectiveGrants(bot.id)))
+        throw new AppError(
+          "The named Bot has tool or host access and cannot take a text-only task",
+          409,
+        );
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError("The named Bot's effective authority could not be verified", 502);
+    }
+    return bot;
+  }
+
+  createTaskChannel(botId: string) {
+    return this.adapter.createConversation(botId, AbortSignal.timeout(10000));
+  }
+
+  runText(
+    botId: string,
+    threadId: string,
+    runId: string,
+    text: string,
+    onStartup: () => Promise<void>,
+    signal: AbortSignal,
+  ) {
+    return this.adapter.runText(botId, threadId, runId, text, onStartup, signal);
+  }
+
+  textResult(botId: string, threadId: string) {
+    return this.adapter.textResult(botId, threadId);
   }
 
   channels(cursor?: string) {

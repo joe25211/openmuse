@@ -66,6 +66,14 @@ export function WorkspaceTools() {
     ),
   });
   useRenderTool({
+    name: "delegate_to_bot",
+    description: "Display the named Bot task",
+    parameters: displayParameters,
+    render: ({ result, status }) => (
+      <ServerToolCard name="Bot task" result={result} loading={status !== "complete"} />
+    ),
+  });
+  useRenderTool({
     name: "delegate_task",
     description: "Display delegated work",
     parameters: displayParameters,

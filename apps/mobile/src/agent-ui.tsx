@@ -131,6 +131,7 @@ export function TaskCard({
           </View>
           <View style={{ flex: 1, gap: 4 }}>
             <Text style={s.heading}>{task.title}</Text>
+            {task.delegation && <Text style={s.small}>Bot: {task.delegation.botName}</Text>}
             <Text style={s.small}>
               {statusLabel(task.status)}
               {task.plan.length ? ` · ${done}/${task.plan.length} steps` : ""}
@@ -386,11 +387,13 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         <ActivityIndicator color={colors.blueDark} />
       ) : (
         <View style={{ gap: 20 }}>
+          {task.delegation && <Text style={s.heading}>Bot: {task.delegation.botName}</Text>}
           <Text selectable style={s.text}>
             {task.prompt}
           </Text>
           <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
-            {!uncertainAction &&
+            {!task.delegation &&
+              !uncertainAction &&
               ["queued", "running", "scheduled", "waiting_input", "waiting_approval"].includes(
                 task.status,
               ) && (
@@ -403,7 +406,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                   Pause
                 </Button>
               )}
-            {task.status === "paused" && !uncertainAction && (
+            {task.status === "paused" && !task.delegation && !uncertainAction && (
               <Button
                 small
                 icon={Play}
@@ -414,6 +417,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               </Button>
             )}
             {task.status === "failed" &&
+              !task.delegation &&
               (!task.actionId || linkedAction?.status === "succeeded") && (
                 <Button
                   small
@@ -424,7 +428,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                   Retry task
                 </Button>
               )}
-            {activeTask(task) && !uncertainAction && (
+            {activeTask(task) && !task.delegation && !uncertainAction && (
               <Button
                 small
                 danger
@@ -555,7 +559,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           {!!task.result && (
             <Card style={{ backgroundColor: colors.green }}>
               <Text selectable style={s.text}>
-                {resultSummary(task.result)}
+                {task.delegation ? task.result : resultSummary(task.result)}
               </Text>
             </Card>
           )}
@@ -908,7 +912,7 @@ function FinanceArtifact({ artifact }: { artifact: AgentArtifact }) {
 export function DelegateSheet() {
   const { workspace, close, open } = useWorkspace();
   const { delegate } = useAgentWorkspace();
-  const [kind, setKind] = useState<AgentTask["kind"]>("plan");
+  const [kind, setKind] = useState<Exclude<AgentTask["kind"], "openbot">>("plan");
   const [prompt, setPrompt] = useState("");
   const [messageId, setMessageId] = useState("");
   const [csv, setCsv] = useState("");
