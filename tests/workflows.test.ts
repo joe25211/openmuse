@@ -10,6 +10,15 @@ import type { ActionProposal } from "../packages/domain/src/index.ts";
 
 let db: Store, server: Awaited<ReturnType<typeof createApp>>, directory: string;
 const owner = "workflow-user";
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {
+    throw new Error("Promise was not initialized");
+  };
+  const promise = new Promise<T>((fulfill) => {
+    resolve = fulfill;
+  });
+  return { promise, resolve };
+}
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), "openmuse-workflows-"));
   db = await createStore({ dataDir: join(directory, "db") });
@@ -124,7 +133,7 @@ test("ideas ignore sent replies while retaining unfinished incoming requests", a
   assert.ok(!ideas.some((idea) => idea.input.messageId === sent.id));
 });
 
-test("cancelling a task denies its pending action", async () => {
+test("cancel denial winning before approval claim prevents execution", async () => {
   const { task, action } = await documentTask();
   await server.agent.control(owner, task.id, "cancel");
   assert.equal(
@@ -133,6 +142,41 @@ test("cancelling a task denies its pending action", async () => {
   );
   await server.agent.worker.tick();
   assert.equal((await server.agent.getTask(owner, task.id)).status, "cancelled");
+});
+
+test("approval claim winning a cancel race keeps the task open for the external result", async (t) => {
+  const { task, action } = await documentTask();
+  const read = deferred<void>();
+  const resumeRead = deferred<void>();
+  const providerStarted = deferred<void>();
+  const finishProvider = deferred<string>();
+  const originalGet = db.get.bind(db);
+  let intercept = true;
+  t.mock.method(db, "get", async (...args: Parameters<Store["get"]>) => {
+    const result = await originalGet(...args);
+    if (intercept && args[0] === owner && args[1] === "actions" && args[2] === action.id) {
+      intercept = false;
+      read.resolve();
+      await resumeRead.promise;
+    }
+    return result;
+  });
+  t.mock.method(server.workspace, "execute", async () => {
+    providerStarted.resolve();
+    return finishProvider.promise;
+  });
+  const cancelling = server.agent.control(owner, task.id, "cancel");
+  await read.promise;
+  const approving = server.actions.decide(owner, action.id, action.hash, "approve");
+  await providerStarted.promise;
+  resumeRead.resolve();
+  await assert.rejects(cancelling, /action started/i);
+  assert.equal((await server.agent.getTask(owner, task.id)).status, "waiting_approval");
+  await assert.rejects(server.agent.control(owner, task.id, "pause"), /may still change/i);
+  finishProvider.resolve("Provider receipt");
+  assert.equal((await approving).status, "succeeded");
+  await server.agent.worker.tick();
+  assert.equal((await server.agent.getTask(owner, task.id)).status, "succeeded");
 });
 
 test("failed page checks back off, expose the error, and pause after repeated failures", async () => {

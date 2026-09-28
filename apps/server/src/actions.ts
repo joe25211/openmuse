@@ -132,7 +132,7 @@ export class ActionService {
           409,
         );
     }
-    if (Date.parse(proposal.expiresAt) <= this.now()) {
+    if (decision === "approve" && Date.parse(proposal.expiresAt) <= this.now()) {
       const expired = await this.db.compareAndSwap<ActionProposal>(
         owner,
         "actions",
@@ -169,12 +169,21 @@ export class ActionService {
           409,
         );
     }
-    const claimed = await this.db.claim<ActionProposal>(
-      owner,
-      id,
-      decision === "deny" ? "denied" : "executing",
-      new Date(this.now()).toISOString(),
-    );
+    const claimed =
+      decision === "deny"
+        ? await this.db.compareAndSwap<ActionProposal>(
+            owner,
+            "actions",
+            id,
+            { status: "awaiting_review", hash },
+            { status: "denied" },
+          )
+        : await this.db.claim<ActionProposal>(
+            owner,
+            id,
+            "executing",
+            new Date(this.now()).toISOString(),
+          );
     if (!claimed) {
       const current = await this.db.get<ActionProposal>(owner, "actions", id);
       if (!current) throw new AppError("Action not found", 404);
@@ -271,22 +280,7 @@ export class ActionService {
           )
         : action;
     if (!resolved) throw new AppError("Action changed; refresh before reconciling", 409);
-    if (resolved.taskId) {
-      const task = await this.db.get<AgentTask>(owner, "tasks", resolved.taskId);
-      if (task?.actionId === id && (task.status === "paused" || task.status === "waiting_approval"))
-        await this.db.compareAndSwap<AgentTask>(
-          owner,
-          "tasks",
-          task.id,
-          { actionId: id, status: task.status, leaseId: task.leaseId ?? null },
-          {
-            ...(completed ? {} : { status: "failed" }),
-            error: completed ? null : resolved.error,
-            state: { ...task.state, notice: null },
-            updatedAt: confirmedAt,
-          },
-        );
-    }
+    await this.syncReconciledTask(owner, resolved);
     if (action.status === "outcome_unknown")
       await this.record(
         owner,
@@ -294,6 +288,26 @@ export class ActionService {
         `You confirmed ${completed ? "completed" : "not completed"}: ${verifiedNote}`,
       );
     return resolved;
+  }
+  async syncReconciledTask(owner: string, action: ActionProposal): Promise<void> {
+    if (!action.taskId || !action.reconciliation) return;
+    const task = await this.db.get<AgentTask>(owner, "tasks", action.taskId);
+    if (task?.actionId !== action.id || !["paused", "waiting_approval"].includes(task.status))
+      return;
+    const completed = action.reconciliation.outcome === "completed";
+    if (completed && task.error == null && task.state.notice == null) return;
+    await this.db.compareAndSwap<AgentTask>(
+      owner,
+      "tasks",
+      task.id,
+      { actionId: action.id, status: task.status, leaseId: task.leaseId ?? null },
+      {
+        ...(completed ? {} : { status: "failed" }),
+        error: completed ? null : action.error,
+        state: { ...task.state, notice: null },
+        updatedAt: new Date(this.now()).toISOString(),
+      },
+    );
   }
   private async record(owner: string, action: ActionProposal, detail: string) {
     await this.db.put(owner, "activity", {

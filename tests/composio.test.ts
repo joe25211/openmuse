@@ -22,6 +22,13 @@ const config: Config = {
   googleRedirectUri: "http://localhost:8787/api/google/callback",
   allowedOrigins: [],
 };
+function deferred() {
+  let resolve = () => {};
+  const promise = new Promise<void>((fulfill) => {
+    resolve = fulfill;
+  });
+  return { promise, resolve };
+}
 
 function composio(
   db: Store,
@@ -178,11 +185,14 @@ test("an AgentTask with an uncertain linked action pauses until reconciliation",
     await server.agent.worker.tick();
     assert.equal((await server.agent.getTask("owner", task.id)).attempts, paused.attempts);
 
-    await db.put("owner", "actions", {
-      ...action,
-      status: "succeeded",
-      result: "Delivery confirmed",
-    });
+    await server.actions.reconcile(
+      "owner",
+      action.id,
+      action.hash,
+      "completed",
+      "Checked the connected app for delivery",
+    );
+    assert.equal((await server.agent.getTask("owner", task.id)).error, null);
     await server.agent.control("owner", task.id, "resume");
     await server.agent.worker.tick();
     assert.equal((await server.agent.getTask("owner", task.id)).status, "succeeded");
@@ -192,3 +202,86 @@ test("an AgentTask with an uncertain linked action pauses until reconciliation",
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+for (const outcome of ["completed", "not_completed"] as const)
+  test(`reconciliation ${outcome} during worker pause checkpoint repairs the linked task`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "openmuse-reconcile-race-"));
+    const db = await createStore();
+    const server = await createApp(db, { ...config, dataDir: directory });
+    const now = new Date().toISOString();
+    const owner = `reconcile-race-${outcome}`;
+    const actionId = `action-${outcome}`;
+    const finishCheckpoint = deferred();
+    const task: AgentTask = {
+      id: `task-${outcome}`,
+      title: "Send reply",
+      prompt: "Send reply",
+      kind: "document",
+      status: "waiting_approval",
+      actionId,
+      plan: [],
+      evidence: [],
+      input: {},
+      state: {},
+      createdAt: now,
+      updatedAt: now,
+      attempts: 0,
+      leaseId: null,
+      leaseUntil: null,
+      artifactIds: [],
+    };
+    const action: ActionProposal = {
+      id: actionId,
+      taskId: task.id,
+      title: "Send reply",
+      kind: "email.send",
+      data: {},
+      status: "outcome_unknown",
+      hash: "hash",
+      createdAt: now,
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
+      error: "Provider did not confirm delivery",
+    };
+    try {
+      await db.put(owner, "tasks", task);
+      await db.put(owner, "actions", action);
+      const beforeCheckpoint = deferred();
+      const originalCas = db.compareAndSwap.bind(db);
+      let intercept = true;
+      t.mock.method(db, "compareAndSwap", async (...args: Parameters<Store["compareAndSwap"]>) => {
+        if (
+          intercept &&
+          args[1] === "tasks" &&
+          args[2] === task.id &&
+          args[4].status === "paused"
+        ) {
+          intercept = false;
+          beforeCheckpoint.resolve();
+          await finishCheckpoint.promise;
+        }
+        return originalCas(...args);
+      });
+      const run = server.agent.worker.tick();
+      await beforeCheckpoint.promise;
+      const resolved = await server.actions.reconcile(
+        owner,
+        action.id,
+        action.hash,
+        outcome,
+        "Checked connected app records",
+      );
+      assert.equal((await server.agent.getTask(owner, task.id)).status, "running");
+      finishCheckpoint.resolve();
+      await run;
+      const settled = await server.agent.getTask(owner, task.id);
+      assert.equal(resolved.status, outcome === "completed" ? "succeeded" : "failed");
+      assert.equal(settled.status, outcome === "completed" ? "paused" : "failed");
+      assert.equal(settled.state.notice, null);
+      assert.equal(settled.error, outcome === "completed" ? null : resolved.error);
+    } finally {
+      finishCheckpoint.resolve();
+      await server.agent.stop();
+      await db.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });

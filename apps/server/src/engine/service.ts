@@ -232,14 +232,19 @@ export class AgentService {
   }
   async control(owner: string, id: string, action: "pause" | "resume" | "cancel" | "retry") {
     const task = await this.getTask(owner, id);
-    if (task.actionId && action !== "pause") {
-      const linked = await this.db.get<ActionProposal>(owner, "actions", task.actionId);
-      if (linked?.status === "outcome_unknown")
-        throw new AppError(
-          "This action's outcome is unknown. Check the linked action and connected app before changing this task.",
-          409,
-        );
-    }
+    const linked = task.actionId
+      ? await this.db.get<ActionProposal>(owner, "actions", task.actionId)
+      : null;
+    if (linked?.status === "outcome_unknown")
+      throw new AppError(
+        "This action's outcome is unknown. Check the linked action and connected app before changing this task.",
+        409,
+      );
+    if (linked?.status === "executing")
+      throw new AppError(
+        "This action may still change the connected app. Check the linked action before changing this task.",
+        409,
+      );
     if (action === "cancel" && task.status === "succeeded")
       throw new AppError("This task is already complete", 409);
     if (action === "retry" && task.status !== "failed")
@@ -263,6 +268,15 @@ export class AgentService {
           409,
         );
     }
+    // Claim denial on the Action row before cancelling; approval must lose that same claim.
+    if (action === "cancel" && linked?.status === "awaiting_review") {
+      const denied = await this.actions.decide(owner, linked.id, linked.hash, "deny");
+      if (denied.status !== "denied" && denied.status !== "expired")
+        throw new AppError(
+          "The reviewed action started; check its outcome before cancelling.",
+          409,
+        );
+    }
     const updated = await this.db.compareAndSwap<AgentTask>(
       owner,
       "tasks",
@@ -278,7 +292,9 @@ export class AgentService {
           action === "cancel"
             ? "Stopped by you."
             : action === "pause"
-              ? "Paused. Resume when you're ready."
+              ? task.actionId
+                ? "Task paused. A reviewed action may still finish; check it before resuming."
+                : "Paused. Resume when you're ready."
               : "",
         ...(task.kind === "monitor" && action === "resume"
           ? { state: { ...task.state, failures: 0, notice: null, resumingMonitor: false } }
@@ -300,11 +316,6 @@ export class AgentService {
           ...(action === "resume" || action === "retry" ? { error: null } : {}),
         },
       );
-    if (action === "cancel" && task.actionId) {
-      const proposal = await this.db.get<ActionProposal>(owner, "actions", task.actionId);
-      if (proposal?.status === "awaiting_review")
-        await this.actions.decide(owner, proposal.id, proposal.hash, "deny");
-    }
     await this.db.put(owner, "run-events", {
       id: randomUUID(),
       taskId: id,
@@ -861,6 +872,11 @@ export class AgentService {
     };
   }
   private async publishOutcome(owner: string, saved: AgentTask) {
+    // Reconciliation may win after the worker reads the Action but before it checkpoints the task.
+    if (saved.actionId) {
+      const action = await this.db.get<ActionProposal>(owner, "actions", saved.actionId);
+      if (action) await this.actions.syncReconciledTask(owner, action);
+    }
     const task = await this.getTask(owner, saved.id);
     if (task.status === "succeeded") {
       await this.notify(
