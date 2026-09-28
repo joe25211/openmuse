@@ -140,6 +140,11 @@ test("ties and ineligible stale-grant Bots are returned as choices or omitted", 
   const emptyRoster = noFitEvents.find((event) => event.type === EventType.TOOL_CALL_RESULT);
   assert.ok(emptyRoster && emptyRoster.type === EventType.TOOL_CALL_RESULT);
   assert.deepEqual(JSON.parse(emptyRoster.content).bots, []);
+  assert.ok(
+    chat.requests[3].body.includes(
+      "if none are eligible or eligibility cannot be verified, explain the limitation and continue locally when possible",
+    ),
+  );
   assert.equal((await chat.db.list("local-user", "tasks")).length, 0);
 });
 
