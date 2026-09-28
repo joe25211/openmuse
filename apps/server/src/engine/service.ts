@@ -52,10 +52,14 @@ const redact = (text: string) =>
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
     .replace(/\bAuthorization\s*:\s*Basic\s+\S+/gi, "Authorization: Basic [redacted]")
     .replace(/\b(https?:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
-    .replace(/\b(?:api[_-]?key|token|cookie|password|secret)\s*[:=]\s*\S+/gi, "[redacted]");
+    .replace(/\b(?:api[_-]?key|token|cookie|password|secret)\s*[:=]\s*\S+/gi, "[redacted]")
+    .replace(
+      /\b[a-z0-9_]+(?:token|cookie|password|secret|credential)\s*[:=]\s*\S+/gi,
+      "[redacted]",
+    );
 
 const unsafeExcerptLine = (line: string) =>
-  /(?:^|[^a-z])(?:secret|token|cookie|password|credential|bearer)(?:$|[^a-z])|(?:api|private|access)[\s_-]?key|\bAuthorization\s*:|\bBasic\s+[A-Za-z0-9+/=]{12,}|https?:\/\/[^\s/]*@|-----BEGIN/i.test(
+  /(?:^|[^a-z])(?:secret|token|cookie|password|credential|bearer)(?:$|[^a-z])|\b[a-z0-9_]+(?:secret|token|cookie|password|credential|bearer)\s*[:=]|(?:api|private|access)[\s_-]?key|\bAuthorization\s*:|\bBasic\s+[A-Za-z0-9+/=]{12,}|https?:\/\/[^\s/]*@|-----BEGIN/i.test(
     line,
   );
 
@@ -146,7 +150,7 @@ function sentContext(input: {
   botId: string;
   runId: string;
 }) {
-  return [
+  const context = [
     `Task: ${redact(input.prompt.trim())}`,
     ...(input.brief?.trim() ? [`Relevant brief: ${redact(input.brief.trim())}`] : []),
     ...(input.sourcePath
@@ -163,6 +167,7 @@ function sentContext(input: {
     `Bot ID: ${input.botId}`,
     `Run ID: ${input.runId}`,
   ].join("\n");
+  return input.sourcePath ? context.replaceAll(input.sourcePath, "[named resource]") : context;
 }
 export class AgentService {
   readonly worker: TaskWorker;

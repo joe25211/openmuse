@@ -192,6 +192,16 @@ test("named resource fallback sends only relevant authorized lines and user supp
     assert.doesNotMatch(task.delegation.sentContext, /PRIVATE_SENTINEL/);
     assert.doesNotMatch(task.delegation.sentContext, /RELEVANT_SECRET_SENTINEL/);
     assert.doesNotMatch(task.delegation.sentContext, /dXNlcjpwYXNzMTIz|P4ssw0rd/);
+    const namedInPrompt = await f.request("conversation-1", {
+      ...input,
+      requestId: "named-in-prompt",
+      prompt: "Summarize garden.txt",
+      brief: "Read garden.txt once",
+    });
+    assert.equal(namedInPrompt.status, 201, await namedInPrompt.clone().text());
+    const namedTask = (await namedInPrompt.json()) as AgentTask;
+    assert.equal(namedTask.delegation?.sourcePath, "garden.txt");
+    assert.doesNotMatch(namedTask.delegation?.sentContext ?? "", /garden\.txt/);
     await writeFile(join(ownerPath, "..notes.txt"), "garden roses from valid dot-prefixed notes");
     const dotFile = await f.request("conversation-1", {
       ...input,
@@ -289,7 +299,7 @@ test("named resource fallback sends only relevant authorized lines and user supp
     const supplied = await f.request("conversation-1", {
       requestId: "supplied",
       botId: "bot-1",
-      prompt: "Summarize this Bearer PROMPT_SENTINEL",
+      prompt: "Summarize this Bearer PROMPT_SENTINEL sessionToken=CAMEL_PROMPT_SENTINEL",
       brief: "api_key=BRIEF_SENTINEL",
       suppliedText: "garden facts supplied by the user\ntoken: CONTENT_SENTINEL",
     });
@@ -298,7 +308,7 @@ test("named resource fallback sends only relevant authorized lines and user supp
     assert.match(suppliedTask.delegation?.sentContext ?? "", /garden facts supplied by the user/);
     assert.doesNotMatch(
       JSON.stringify(suppliedTask),
-      /PROMPT_SENTINEL|BRIEF_SENTINEL|CONTENT_SENTINEL/,
+      /PROMPT_SENTINEL|CAMEL_PROMPT_SENTINEL|BRIEF_SENTINEL|CONTENT_SENTINEL/,
     );
     assert.equal(
       (
@@ -307,6 +317,17 @@ test("named resource fallback sends only relevant authorized lines and user supp
           botId: "bot-1",
           prompt: "Summarize supplied notes",
           suppliedText: "Authorization: Basic Zm9vYmFy",
+        })
+      ).status,
+      422,
+    );
+    assert.equal(
+      (
+        await f.request("conversation-1", {
+          requestId: "unsafe-camel-case-only",
+          botId: "bot-1",
+          prompt: "Summarize supplied notes",
+          suppliedText: "sessionToken=UNSAFE_ONLY_SENTINEL",
         })
       ).status,
       422,
