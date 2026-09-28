@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstat, open, realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { CopilotKitIntelligence } from "@copilotkit/runtime/v2";
 import { z } from "zod";
 import type { OpenBotRunObservation } from "../../../../packages/backends/src/openbot.ts";
@@ -53,12 +53,18 @@ const redact = (text: string) =>
     .replace(/\b(?:api[_-]?key|token|cookie|password|secret)\s*[:=]\s*\S+/gi, "[redacted]");
 
 async function namedText(root: string | undefined, path: string) {
-  if (!root || isAbsolute(path) || path.split(/[\\/]/).includes(".."))
+  const parts = path.split(/[\\/]/);
+  if (!root || isAbsolute(path) || parts.some((part) => !part || part === "." || part === ".."))
     throw new AppError("This named resource cannot be read safely; supply its text", 422);
   try {
     const base = await realpath(root);
+    let current = base;
+    for (const part of parts) {
+      current = join(current, part);
+      if ((await lstat(current)).isSymbolicLink()) throw new Error();
+    }
     const target = await realpath(resolve(base, path));
-    const inside = relative(base, target);
+    const inside = relative(join(base, parts[0] ?? ""), target);
     if (!inside || inside.startsWith("..") || isAbsolute(inside)) throw new Error();
     const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
@@ -69,7 +75,15 @@ async function namedText(root: string | undefined, path: string) {
         info.size > 64 * 1024
       )
         throw new Error();
-      const text = await handle.readFile("utf8");
+      const bytes = Buffer.alloc(64 * 1024 + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, length, bytes.length - length, length);
+        if (!bytesRead) break;
+        length += bytesRead;
+      }
+      if (length > 64 * 1024) throw new Error();
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length));
       if (text.includes("\0")) throw new Error();
       return text;
     } finally {
@@ -89,7 +103,12 @@ function relevantExcerpt(text: string, request: string) {
   return redact(
     text
       .split(/\r?\n/)
-      .filter((line) => [...words].some((word) => line.toLowerCase().includes(word)))
+      .filter(
+        (line) =>
+          !/(?:secret|token|cookie|password|credential|(?:api|private|access)[\s_-]?key|bearer|-----BEGIN)/i.test(
+            line,
+          ) && [...words].some((word) => line.toLowerCase().includes(word)),
+      )
       .slice(0, 6)
       .join("\n")
       .slice(0, 4000),
@@ -377,17 +396,22 @@ export class AgentService {
           throw error;
         })
       : null;
-    const fallbackExcerpt = sourceText
+    const sourceExcerpt = sourceText
       ? relevantExcerpt(sourceText, `${safePrompt} ${safeBrief ?? ""}`)
-      : input.suppliedText
-        ? redact(input.suppliedText.trim())
-        : undefined;
+      : undefined;
+    const fallbackExcerpt =
+      sourceExcerpt || (input.suppliedText ? redact(input.suppliedText.trim()) : undefined);
     if (input.sourcePath && !fallbackExcerpt)
       throw new AppError("No relevant excerpt was found; supply the text to include", 422);
     const mode =
-      input.sourcePath && sourceText && this.config.openbotScopedReadToken
+      input.sourcePath &&
+      sourceText &&
+      this.config.openbotScopedReadToken &&
+      this.config.openbotScopedReadSigningKey &&
+      this.config.openbotScopedReadSigningKey.length >= 32 &&
+      this.config.openbotScopedReadSigningKey !== this.config.openbotScopedReadToken
         ? ("direct" as const)
-        : sourceText
+        : sourceExcerpt
           ? ("excerpt" as const)
           : input.suppliedText
             ? ("supplied" as const)
@@ -1001,7 +1025,7 @@ export class AgentService {
     task: AgentTask,
     context: TaskContext,
   ): Promise<Partial<AgentTask>> {
-    if (task.delegation) return this.executeDelegation(task, context);
+    if (task.delegation) return this.executeDelegation(owner, task, context);
     await context.event(
       "status",
       task.attempts === 1 ? "Started working" : "Resumed work",
@@ -1111,6 +1135,7 @@ export class AgentService {
     return executeModelTask(this, owner, task, context);
   }
   private async executeDelegation(
+    owner: string,
     task: AgentTask,
     context: TaskContext,
   ): Promise<Partial<AgentTask>> {
@@ -1188,6 +1213,7 @@ export class AgentService {
           };
         try {
           scopeSecret = await gateway.bindScopedRead(
+            owner,
             task.id,
             delegation.botId,
             delegation.threadId,

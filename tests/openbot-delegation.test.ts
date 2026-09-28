@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import test from "node:test";
 import { createApp } from "../apps/server/src/app.ts";
 import type { Config } from "../apps/server/src/config.ts";
 import { createStore } from "../apps/server/src/db.ts";
+import { OpenBotGateway } from "../apps/server/src/openbot.ts";
 import type { AgentTask } from "../packages/domain/src/agent.ts";
 
 async function fixture() {
@@ -102,6 +103,61 @@ async function fixture() {
   };
 }
 
+test("scoped registration signs the owner and exact run tuple separately from the bearer", async () => {
+  let received: Record<string, string> | undefined;
+  const server = createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    received = JSON.parse(body) as Record<string, string>;
+    response.writeHead(200, { "Content-Type": "application/json" }).end("{}");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const address = server.address();
+    assert(address && typeof address !== "string");
+    const gateway = new OpenBotGateway({
+      openbotEnabled: true,
+      openbotBaseUrl: `http://127.0.0.1:${address.port}`,
+      openbotScopedReadToken: "shared-bearer",
+      openbotScopedReadSigningKey: "independent-signing-key-at-least-32-bytes",
+    } as Config);
+    const owner = "owner-1";
+    const path = `${createHash("sha256").update(owner).digest("hex").slice(0, 24)}/garden.txt`;
+    const secret = await gateway.bindScopedRead(
+      owner,
+      "task-1",
+      "bot-1",
+      "thread-1",
+      "00000000-0000-4000-8000-000000000001",
+      path,
+    );
+    const tuple = JSON.stringify([
+      owner,
+      "task-1",
+      "bot-1",
+      "thread-1",
+      "00000000-0000-4000-8000-000000000001",
+      path,
+    ]);
+    assert.equal(received?.owner, owner);
+    assert.equal(received?.runSecret, secret);
+    assert.equal(
+      received?.signature,
+      createHmac("sha256", "independent-signing-key-at-least-32-bytes")
+        .update(tuple)
+        .digest("base64url"),
+    );
+    assert.notEqual(
+      received?.signature,
+      createHmac("sha256", "shared-bearer").update(tuple).digest("base64url"),
+    );
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});
+
 test("named resource fallback sends only relevant authorized lines and user supplied text", async () => {
   const f = await fixture();
   try {
@@ -114,6 +170,7 @@ test("named resource fallback sends only relevant authorized lines and user supp
       join(ownerPath, "garden.txt"),
       [
         "garden roses need sunlight",
+        "garden roses PRIVATE_KEY=RELEVANT_SECRET_SENTINEL need shade",
         "unrelated PRIVATE_SENTINEL_COOKIE=keep-out",
         "garden roses need water",
       ].join("\n"),
@@ -131,6 +188,44 @@ test("named resource fallback sends only relevant authorized lines and user supp
     assert.match(task.delegation.sentContext, /garden roses need sunlight/);
     assert.match(task.delegation.sentContext, /garden roses need water/);
     assert.doesNotMatch(task.delegation.sentContext, /PRIVATE_SENTINEL/);
+    assert.doesNotMatch(task.delegation.sentContext, /RELEVANT_SECRET_SENTINEL/);
+    await writeFile(
+      join(ownerPath, "unsafe.txt"),
+      "garden roses private key: UNSAFE_ONLY_SENTINEL",
+    );
+    const safeFallback = await f.request("conversation-1", {
+      ...input,
+      requestId: "unsafe-supplied",
+      sourcePath: "unsafe.txt",
+      suppliedText: "User-approved garden roses summary",
+    });
+    assert.equal(safeFallback.status, 201, await safeFallback.clone().text());
+    const safeTask = (await safeFallback.json()) as AgentTask;
+    assert.equal(safeTask.delegation?.readMode, "supplied");
+    assert.match(safeTask.delegation.sentContext, /User-approved garden roses summary/);
+    assert.doesNotMatch(safeTask.delegation.sentContext, /UNSAFE_ONLY_SENTINEL/);
+    await symlink(join(ownerPath, "garden.txt"), join(ownerPath, "alias.txt"));
+    assert.equal(
+      (
+        await f.request("conversation-1", {
+          ...input,
+          requestId: "symlink-rejected",
+          sourcePath: "alias.txt",
+        })
+      ).status,
+      422,
+    );
+    await writeFile(join(ownerPath, "invalid.txt"), Buffer.from([0xff]));
+    assert.equal(
+      (
+        await f.request("conversation-1", {
+          ...input,
+          requestId: "invalid-rejected",
+          sourcePath: "invalid.txt",
+        })
+      ).status,
+      422,
+    );
     assert.equal(
       (
         await f.request("conversation-1", {

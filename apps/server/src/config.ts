@@ -47,6 +47,7 @@ export interface Config {
   openbotBaseUrl?: string;
   openbotScopedReadRoot?: string;
   openbotScopedReadToken?: string;
+  openbotScopedReadSigningKey?: string;
   googleRedirectUri: string;
   workerUrl?: string;
   workerToken?: string;
@@ -119,6 +120,7 @@ export function readConfig(): Config {
     openbotBaseUrl: process.env.OPENBOT_BASE_URL,
     openbotScopedReadRoot: process.env.OPENMUSE_SCOPED_READ_ROOT,
     openbotScopedReadToken: process.env.OPENMUSE_SCOPED_READ_TOKEN,
+    openbotScopedReadSigningKey: process.env.OPENMUSE_SCOPED_READ_SIGNING_KEY,
     googleRedirectUri: `${publicUrl}/api/google/callback`,
     workerUrl: process.env.BROWSER_WORKER_URL,
     workerToken: process.env.WORKER_TOKEN,

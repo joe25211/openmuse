@@ -35,10 +35,12 @@ export class OpenBotGateway {
   private readonly base?: URL;
   private readonly adapter: OpenBotAdapter;
   private readonly scopedReadToken?: string;
+  private readonly scopedReadSigningKey?: string;
   private probeCache?: { expiresAt: number; result: ReturnType<OpenBotAdapter["probe"]> };
 
   constructor(config: Config) {
     this.scopedReadToken = config.openbotScopedReadToken?.trim();
+    this.scopedReadSigningKey = config.openbotScopedReadSigningKey?.trim();
     if (config.openbotEnabled) {
       if (!config.openbotBaseUrl) throw new Error("OPENBOT_BASE_URL is required when enabled");
       const base = new URL(config.openbotBaseUrl);
@@ -109,15 +111,26 @@ export class OpenBotGateway {
   }
 
   async bindScopedRead(
+    owner: string,
     taskId: string,
     botId: string,
     threadId: string,
     runId: string,
     path: string,
   ) {
-    if (!this.scopedReadToken) throw new AppError("Scoped reads are unavailable", 503);
-    const runSecret = createHmac("sha256", this.scopedReadToken)
-      .update(JSON.stringify([taskId, botId, threadId, runId, path]))
+    if (
+      !this.scopedReadToken ||
+      !this.scopedReadSigningKey ||
+      this.scopedReadSigningKey.length < 32 ||
+      this.scopedReadSigningKey === this.scopedReadToken
+    )
+      throw new AppError("Scoped reads are unavailable", 503);
+    const tuple = JSON.stringify([owner, taskId, botId, threadId, runId, path]);
+    const runSecret = createHmac("sha256", this.scopedReadSigningKey)
+      .update(`run:${tuple}`)
+      .digest("base64url");
+    const signature = createHmac("sha256", this.scopedReadSigningKey)
+      .update(tuple)
       .digest("base64url");
     const response = await fetch(new URL("/api/openmuse/scoped-runs", this.requireBase()), {
       method: "POST",
@@ -125,7 +138,7 @@ export class OpenBotGateway {
         Authorization: `Bearer ${this.scopedReadToken}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ taskId, botId, threadId, runId, path, runSecret }),
+      body: JSON.stringify({ owner, taskId, botId, threadId, runId, path, runSecret, signature }),
       redirect: "error",
       signal: AbortSignal.timeout(5000),
     });
