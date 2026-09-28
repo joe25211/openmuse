@@ -20,7 +20,7 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react-native";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Image,
@@ -58,7 +58,7 @@ import {
   s,
   timeLabel,
 } from "./ui";
-import { useWorkspace } from "./workspace";
+import { type OpenBotChannel, useWorkspace } from "./workspace";
 
 function todayDate() {
   return localDateTime(new Date().toISOString(), Intl.DateTimeFormat().resolvedOptions().timeZone)
@@ -81,7 +81,7 @@ export function TodayScreen() {
       <View
         style={[
           {
-            backgroundColor: "#E8F2F8",
+            backgroundColor: colors.card,
             borderRadius: 24,
             padding: 32,
             minHeight: 228,
@@ -106,7 +106,7 @@ export function TodayScreen() {
           >
             Your day, with a little{"\n"}more room to breathe.
           </Text>
-          <Text style={[s.muted, { maxWidth: 420, color: "#617680" }]}>
+          <Text style={[s.muted, { maxWidth: 420 }]}>
             {events.length ? `${events.length} things on your calendar` : "Your calendar has room"}
             {unread.length ? `, ${unread.length} unread emails` : ""}.{"\n"}Let’s make space for
             what matters.
@@ -128,7 +128,7 @@ export function TodayScreen() {
                 width: 190,
                 height: 190,
                 borderRadius: 100,
-                backgroundColor: "#DAEAF2",
+                backgroundColor: colors.line,
               }}
             />
             <View
@@ -138,7 +138,7 @@ export function TodayScreen() {
                 height: 145,
                 borderRadius: 80,
                 borderWidth: 1,
-                borderColor: "#C8DBE6",
+                borderColor: colors.muted,
               }}
             />
             <Mascot size={94} />
@@ -151,13 +151,13 @@ export function TodayScreen() {
                   left: -19,
                   padding: 11,
                   gap: 7,
-                  backgroundColor: "#FFF",
+                  backgroundColor: colors.line,
                   borderRadius: 13,
                   transform: [{ rotate: "-7deg" }],
                 },
               ]}
             >
-              <Check size={14} color="#739174" />
+              <Check size={14} color={colors.blueDark} />
               <Text style={s.small}>A lighter day</Text>
             </View>
             <View
@@ -169,7 +169,7 @@ export function TodayScreen() {
                   right: -8,
                   padding: 12,
                   gap: 8,
-                  backgroundColor: "#FFF",
+                  backgroundColor: colors.line,
                   borderRadius: 13,
                   transform: [{ rotate: "5deg" }],
                 },
@@ -303,7 +303,12 @@ export function TodayScreen() {
                 </View>
                 {m.unread && (
                   <View
-                    style={{ width: 5, height: 5, borderRadius: 4, backgroundColor: "#78ABD0" }}
+                    style={{
+                      width: 5,
+                      height: 5,
+                      borderRadius: 4,
+                      backgroundColor: colors.blueDark,
+                    }}
                   />
                 )}
               </Pressable>
@@ -318,7 +323,7 @@ export function TodayScreen() {
         </Card>
       </View>
       <View style={{ flexDirection: wide ? "row" : "column", gap: 22 }}>
-        <Card style={{ flex: 1, backgroundColor: "#F0F0E7" }}>
+        <Card style={{ flex: 1, backgroundColor: colors.card }}>
           <SectionHeading title="A hand with the little things" />
           <Text style={[s.muted, { marginBottom: 15 }]}>
             Start with a thought. We’ll take it from there.
@@ -333,7 +338,7 @@ export function TodayScreen() {
               onPress={() => ask(prompt)}
               style={[
                 s.between,
-                { borderTopWidth: 1, borderTopColor: "#E1E2D9", paddingVertical: 13 },
+                { borderTopWidth: 1, borderTopColor: colors.line, paddingVertical: 13 },
               ]}
             >
               <Text style={[s.text, { fontSize: 12 }]}>{prompt}</Text>
@@ -433,7 +438,7 @@ export function AgendaRow({
           width: 3,
           height: 42,
           borderRadius: 4,
-          backgroundColor: ["#BCDAEB", "#C7D6AB", "#D9CDEA"][index % 3],
+          backgroundColor: [colors.blueDark, colors.muted, colors.text][index % 3],
         }}
       />
       <View style={{ flex: 1, gap: 3 }}>
@@ -476,7 +481,7 @@ export function MailScreen() {
               gap: 9,
               flex: 1,
               minWidth: 200,
-              backgroundColor: "#FFF",
+              backgroundColor: colors.card,
               borderWidth: 1,
               borderColor: colors.line,
               borderRadius: 12,
@@ -560,7 +565,7 @@ export function MailScreen() {
               </View>
               {m.unread && (
                 <View
-                  style={{ width: 6, height: 6, borderRadius: 4, backgroundColor: "#83B5D3" }}
+                  style={{ width: 6, height: 6, borderRadius: 4, backgroundColor: colors.blueDark }}
                 />
               )}
             </Pressable>
@@ -754,7 +759,7 @@ export function CalendarScreen() {
                     backgroundColor: [...events, ...w.events].some(
                       (e) => e.calendarId === calendarId && eventDate(e) === key,
                     )
-                      ? "#8DB6CA"
+                      ? colors.blueDark
                       : "transparent",
                   }}
                 />
@@ -987,7 +992,7 @@ export function FilesScreen() {
               <View
                 style={{
                   height: 175,
-                  backgroundColor: "#EDEFEA",
+                  backgroundColor: colors.line,
                   justifyContent: "center",
                   alignItems: "center",
                 }}
@@ -997,11 +1002,11 @@ export function FilesScreen() {
                     width: 93,
                     height: 121,
                     borderRadius: 5,
-                    backgroundColor: "#FFF",
+                    backgroundColor: colors.card,
                     padding: 14,
                     transform: [{ rotate: "-4deg" }],
                     borderWidth: 1,
-                    borderColor: "#DDE3DD",
+                    borderColor: colors.muted,
                   }}
                 >
                   <View style={[s.row, { gap: 5, marginBottom: 15 }]}>
@@ -1013,7 +1018,7 @@ export function FilesScreen() {
                       key={width}
                       style={{
                         height: 3,
-                        backgroundColor: i === 0 ? "#A4BED0" : "#E3E7E3",
+                        backgroundColor: i === 0 ? colors.blueDark : colors.line,
                         width: `${width}%`,
                         marginBottom: 7,
                         borderRadius: 3,
@@ -1103,7 +1108,7 @@ export function ActivityScreen() {
               <Chip
                 tint={
                   a.status === "failed"
-                    ? "#FBEFED"
+                    ? colors.line
                     : a.status === "awaiting_review"
                       ? colors.lavender
                       : colors.canvas
@@ -1171,10 +1176,102 @@ export function ActivityScreen() {
   );
 }
 export function ConnectionsScreen({ query = "" }: { query?: string }) {
-  const { workspace: w, api, refresh, notify, open } = useWorkspace();
+  const { workspace: w, api, refresh, notify, open, openOpenBot } = useWorkspace();
   const [selected, setSelected] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [appSearch, setAppSearch] = useState("");
+  const [apps, setApps] = useState<
+    { slug: string; name: string; connected: boolean; accountId?: string }[]
+  >([]);
+  const [appCursor, setAppCursor] = useState<string>();
+  const [loadedSearch, setLoadedSearch] = useState("");
+  const appRequest = useRef(0);
+  const [openbotAgents, setOpenbotAgents] = useState<
+    { id: string; name: string; title?: string }[]
+  >([]);
+  const [openbotChannels, setOpenbotChannels] = useState<OpenBotChannel[]>([]);
+  const [openbotCursor, setOpenbotCursor] = useState<string>();
+  const [openbotNeedsRefresh, setOpenbotNeedsRefresh] = useState(false);
+  async function loadOpenBot(cursor?: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const [agents, channels] = await Promise.all([
+        api.request<{ agents: typeof openbotAgents }>("/api/openbot/agents"),
+        api.request<{ channels: OpenBotChannel[]; nextCursor?: string }>(
+          `/api/openbot/channels${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`,
+        ),
+      ]);
+      setOpenbotAgents(agents.agents);
+      setOpenbotChannels((current) =>
+        cursor ? [...current, ...channels.channels] : channels.channels,
+      );
+      setOpenbotCursor(channels.nextCursor ?? undefined);
+      if (!cursor) setOpenbotNeedsRefresh(false);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function createOpenBotChannel(agent: { id: string; name: string }) {
+    if (busy || openbotNeedsRefresh) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.request<{ channel: OpenBotChannel }>("/api/openbot/channels", {
+        agentId: agent.id,
+      });
+      setSelected(undefined);
+      openOpenBot({ ...result.channel, name: agent.name });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setOpenbotNeedsRefresh(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function loadApps(search: string, cursor?: string) {
+    const request = ++appRequest.current;
+    setBusy(true);
+    setError("");
+    if (!cursor) {
+      setApps([]);
+      setAppCursor(undefined);
+    }
+    try {
+      const result = await api.request<{ items: typeof apps; cursor?: string }>(
+        `/api/composio/toolkits?search=${encodeURIComponent(search)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      );
+      if (request !== appRequest.current) return;
+      setApps((current) => (cursor ? [...current, ...result.items] : result.items));
+      setAppCursor(result.cursor);
+      if (!cursor) setLoadedSearch(search);
+    } catch (e) {
+      if (request === appRequest.current) setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (request === appRequest.current) setBusy(false);
+    }
+  }
+  async function connectApp(toolkit: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.request<{ connected: boolean; url: string | null }>(
+        "/api/composio/connect",
+        { toolkit },
+      );
+      if (result.url) {
+        await Linking.openURL(result.url);
+        notify("Finish connecting in your browser, then refresh this app list.");
+      } else notify("This app is already connected.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function connect(capability: "read" | "write") {
     setBusy(true);
     setError("");
@@ -1210,6 +1307,8 @@ export function ConnectionsScreen({ query = "" }: { query?: string }) {
     }
   }
   const google = w.connections.find((c) => c.id === "google");
+  const composio = w.connections.find((c) => c.id === "composio");
+  const openbot = w.connections.find((c) => c.id === "openbot");
   const connected = google?.status === "connected" || google?.status === "sample";
   const rows = [
     { id: "gmail", name: "Gmail", icon: Mail, color: "#EA5B4D", connected, group: "google" },
@@ -1225,16 +1324,24 @@ export function ConnectionsScreen({ query = "" }: { query?: string }) {
       id: "browser",
       name: "Agent computer",
       icon: Globe2,
-      color: "#1987CF",
+      color: colors.blueDark,
       connected: w.connections.some((c) => c.id === "browser" && c.status === "connected"),
       group: "browser",
+    },
+    {
+      id: "composio",
+      name: "Composio apps",
+      icon: Link2,
+      color: colors.blueDark,
+      connected: false,
+      group: "composio",
     },
     {
       id: "openbot",
       name: "OpenBot",
       icon: Sparkles,
-      color: "#6866A6",
-      connected: false,
+      color: colors.blueDark,
+      connected: openbot?.status === "connected",
       group: "openbot",
     },
   ].filter((row) => `${row.name} ${row.group}`.toLowerCase().includes(query.toLowerCase()));
@@ -1252,22 +1359,31 @@ export function ConnectionsScreen({ query = "" }: { query?: string }) {
                   : "Connected"
                 : "Available integrations"}
             </Text>
-            <View style={{ paddingHorizontal: 16, borderRadius: 23, backgroundColor: "#F3F4F5" }}>
+            <View style={{ paddingHorizontal: 16, borderRadius: 23, backgroundColor: colors.card }}>
               {group.map((row, index) => (
                 <Pressable
                   key={row.id}
                   accessibilityRole="button"
                   accessibilityLabel={`Manage ${row.name}`}
-                  onPress={() =>
-                    row.group === "browser" ? open({ type: "computer" }) : setSelected(row.group)
-                  }
+                  onPress={() => {
+                    if (row.group === "browser") open({ type: "computer" });
+                    else {
+                      setSelected(row.group);
+                      if (row.group === "composio" && composio?.status === "configured") {
+                        setAppSearch("");
+                        void loadApps("");
+                      }
+                      if (row.group === "openbot" && openbot?.status === "connected")
+                        void loadOpenBot();
+                    }
+                  }}
                   style={[
                     s.row,
                     {
                       gap: 14,
                       minHeight: 61,
                       borderBottomWidth: index < group.length - 1 ? 1 : 0,
-                      borderBottomColor: "#E5E7E9",
+                      borderBottomColor: colors.line,
                     },
                   ]}
                 >
@@ -1276,7 +1392,7 @@ export function ConnectionsScreen({ query = "" }: { query?: string }) {
                       width: 29,
                       height: 29,
                       borderRadius: 7,
-                      backgroundColor: "#FFF",
+                      backgroundColor: colors.line,
                       alignItems: "center",
                       justifyContent: "center",
                     }}
@@ -1288,7 +1404,7 @@ export function ConnectionsScreen({ query = "" }: { query?: string }) {
                     <Text style={s.small}>Local data</Text>
                   )}
                   {row.connected ? (
-                    <ChevronRight size={18} color="#A4A7AA" />
+                    <ChevronRight size={18} color={colors.muted} />
                   ) : (
                     <Text
                       style={{
@@ -1296,7 +1412,11 @@ export function ConnectionsScreen({ query = "" }: { query?: string }) {
                         color: row.group === "google" ? colors.blueDark : colors.muted,
                       }}
                     >
-                      {row.group === "google" ? "Connect" : "Setup"}
+                      {row.group === "google"
+                        ? "Connect"
+                        : row.group === "composio" && composio?.status === "configured"
+                          ? "Browse"
+                          : "Setup"}
                     </Text>
                   )}
                 </Pressable>
@@ -1308,8 +1428,20 @@ export function ConnectionsScreen({ query = "" }: { query?: string }) {
       {!rows.length && <Text style={s.muted}>No matching connectors.</Text>}
       {selected && (
         <Sheet
-          title={selected === "google" ? "Google connections" : "OpenBot"}
-          subtitle={selected === "google" ? google?.account : "A computer for your agent"}
+          title={
+            selected === "google"
+              ? "Google connections"
+              : selected === "composio"
+                ? "Composio apps"
+                : "OpenBot"
+          }
+          subtitle={
+            selected === "google"
+              ? google?.account
+              : selected === "composio"
+                ? "Connect apps for OpenMuse"
+                : "OpenBot Bots and conversations"
+          }
           onClose={() => setSelected(undefined)}
         >
           {selected === "google" ? (
@@ -1361,16 +1493,117 @@ export function ConnectionsScreen({ query = "" }: { query?: string }) {
                 Refresh connections
               </Button>
             </View>
+          ) : selected === "composio" ? (
+            <View style={{ gap: 14 }}>
+              {composio?.status !== "configured" ? (
+                <Text style={s.muted}>
+                  Add a Composio Platform project API key to the server as COMPOSIO_API_KEY, then
+                  restart OpenMuse.
+                </Text>
+              ) : (
+                <>
+                  <Text style={s.muted}>
+                    Choose each app you want OpenMuse to use. Read tools run with a read-only
+                    policy; changes require a separate review in OpenMuse.
+                  </Text>
+                  <View style={[s.row, { gap: 8 }]}>
+                    <TextInput
+                      accessibilityLabel="Search Composio apps"
+                      value={appSearch}
+                      onChangeText={setAppSearch}
+                      onSubmitEditing={() => void loadApps(appSearch)}
+                      placeholder="Search apps"
+                      placeholderTextColor={colors.muted}
+                      style={[s.input, { flex: 1 }]}
+                    />
+                    <Button busy={busy} icon={Search} onPress={() => void loadApps(appSearch)}>
+                      Search
+                    </Button>
+                  </View>
+                  <ErrorNotice error={error} />
+                  {apps.map((app) => (
+                    <Pressable
+                      key={app.slug}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${app.connected ? "Connected" : "Connect"} ${app.name}`}
+                      disabled={busy || app.connected}
+                      onPress={() => void connectApp(app.slug)}
+                      style={[s.row, { gap: 10, paddingVertical: 10 }]}
+                    >
+                      <Text style={[s.text, { flex: 1 }]}>{app.name}</Text>
+                      <Text style={s.small}>{app.connected ? "Connected" : "Connect"}</Text>
+                    </Pressable>
+                  ))}
+                  {!!appCursor && (
+                    <Button busy={busy} onPress={() => void loadApps(loadedSearch, appCursor)}>
+                      Load more apps
+                    </Button>
+                  )}
+                  <Button busy={busy} onPress={() => void loadApps(appSearch)}>
+                    Refresh apps
+                  </Button>
+                </>
+              )}
+            </View>
           ) : (
             <View style={{ gap: 14 }}>
               <Text style={s.text}>
-                The OpenBot adapter is available in this open-source project. A live OpenBot backend
-                has not been configured.
+                {openbot?.status === "connected"
+                  ? "Choose an OpenBot conversation or start one with a Bot."
+                  : openbot?.status === "unavailable"
+                    ? "OpenBot is configured but is not responding. Check the local OpenBot server."
+                    : "Set OPENBOT_ENABLED=true and OPENBOT_BASE_URL on the OpenMuse server to connect a local OpenBot deployment."}
               </Text>
-              <Text style={s.muted}>
-                Your current computer uses OpenMuse’s persistent Chromium worker. OpenBot
-                integration will expand the execution backend while keeping this interface.
-              </Text>
+              {openbot?.status === "connected" && (
+                <>
+                  <Text style={s.muted}>
+                    This chat uses OpenBot channels. OpenBot computer controls are available in its
+                    own web app.
+                  </Text>
+                  <ErrorNotice error={error} />
+                  {openbotNeedsRefresh && (
+                    <Button busy={busy} onPress={() => void loadOpenBot()}>
+                      Refresh conversations
+                    </Button>
+                  )}
+                  {openbotChannels
+                    .filter((channel) => channel.agentIds.length === 1)
+                    .map((channel) => (
+                      <LinkRow
+                        key={channel.id}
+                        icon={Sparkles}
+                        title={channel.name || "OpenBot conversation"}
+                        detail="Continue conversation"
+                        onPress={() => {
+                          setSelected(undefined);
+                          openOpenBot(channel);
+                        }}
+                      />
+                    ))}
+                  {!!openbotCursor && (
+                    <Button busy={busy} onPress={() => void loadOpenBot(openbotCursor)}>
+                      Load more conversations
+                    </Button>
+                  )}
+                  <Text style={s.heading}>New conversation</Text>
+                  {openbotAgents.map((agent) => (
+                    <LinkRow
+                      key={agent.id}
+                      icon={Sparkles}
+                      title={agent.name}
+                      detail={agent.title || "OpenBot Bot"}
+                      onPress={() => {
+                        if (openbotNeedsRefresh)
+                          setError("Refresh conversations before creating another.");
+                        else void createOpenBotChannel(agent);
+                      }}
+                    />
+                  ))}
+                  <Button busy={busy} onPress={() => void loadOpenBot()}>
+                    Refresh OpenBot
+                  </Button>
+                </>
+              )}
             </View>
           )}
         </Sheet>

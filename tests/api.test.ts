@@ -58,6 +58,83 @@ test("API protects private data and rejects unrelated web origins", async () => 
     403,
   );
 });
+test("action reconciliation requires authentication, exact review hash, and verification evidence", async () => {
+  const action: ActionProposal = {
+    id: "api-reconcile",
+    title: "Send a message",
+    kind: "email.send",
+    data: {
+      to: ["sam@example.com"],
+      subject: "Visit",
+      body: "Hello",
+      cc: [],
+      bcc: [],
+      attachmentIds: [],
+    },
+    status: "outcome_unknown",
+    hash: "a".repeat(64),
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60000).toISOString(),
+    error: "Provider response lost",
+  };
+  await db.put("local-user", "actions", action);
+  const request = (body: unknown, authenticated = true) =>
+    app.request(`/api/actions/${action.id}/reconcile`, {
+      method: "POST",
+      headers: authenticated ? headers() : { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  assert.equal(
+    (await request({ hash: action.hash, outcome: "completed", note: "Checked sent mail" }, false))
+      .status,
+    401,
+  );
+  assert.equal(
+    (await request({ hash: action.hash, outcome: "completed", note: "short" })).status,
+    422,
+  );
+  assert.equal(
+    (await request({ hash: "b".repeat(64), outcome: "completed", note: "Checked sent mail" }))
+      .status,
+    409,
+  );
+  const response = await request({
+    hash: action.hash,
+    outcome: "completed",
+    note: "Checked sent mail",
+  });
+  assert.equal(response.status, 200, await response.clone().text());
+  const reconciled: ActionProposal = await response.json();
+  assert.equal(reconciled.status, "succeeded");
+  assert.equal(reconciled.reconciliation?.note, "Checked sent mail");
+  assert.equal(
+    (await request({ hash: action.hash, outcome: "not_completed", note: "Checked sent mail" }))
+      .status,
+    409,
+  );
+});
+test("Composio stays unavailable without a server project key", async () => {
+  const workspace: Workspace = await (
+    await app.request("/api/workspace", { headers: headers() })
+  ).json();
+  assert.equal(
+    workspace.connections.find((connection) => connection.id === "composio")?.status,
+    "unconfigured",
+  );
+  assert.equal((await app.request("/api/composio/toolkits")).status, 401);
+  assert.equal((await app.request("/api/composio/toolkits", { headers: headers() })).status, 503);
+});
+test("Composio utility toolkits are not connectable apps", async () => {
+  for (const toolkit of ["composio", "composio_search"]) {
+    const response = await app.request("/api/composio/connect", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ toolkit }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /Choose a specific app/);
+  }
+});
 test("sample workspace serves a real PDF and filling creates a new version", async () => {
   const response = await app.request("/api/workspace", { headers: headers() });
   assert.equal(response.status, 200);

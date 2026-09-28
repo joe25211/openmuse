@@ -117,7 +117,7 @@ export function TaskCard({
           padding: compact ? 15 : 20,
           gap: 11,
           borderRadius: 22,
-          backgroundColor: "#F0F1F2",
+          backgroundColor: colors.card,
         }}
       >
         <View style={[s.row, { gap: 10 }]}>
@@ -144,7 +144,7 @@ export function TaskCard({
               style={{
                 height: 4,
                 width: `${Math.round((done / task.plan.length) * 100)}%`,
-                backgroundColor: "#6AAEE0",
+                backgroundColor: colors.blueDark,
                 borderRadius: 4,
               }}
             />
@@ -221,7 +221,7 @@ export function EvidenceList({ items }: { items: Evidence[] }) {
       {items.map((item) => (
         <View
           key={item.id}
-          style={{ borderLeftWidth: 2, borderLeftColor: colors.blue, paddingLeft: 12, gap: 4 }}
+          style={{ borderLeftWidth: 2, borderLeftColor: colors.blueDark, paddingLeft: 12, gap: 4 }}
         >
           <Text style={[s.small, { color: colors.text, fontWeight: "600" }]}>{item.title}</Text>
           <Text selectable style={s.small}>
@@ -282,6 +282,8 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const [showFieldJson, setShowFieldJson] = useState(false);
   const [fields, setFields] = useState<Record<string, string | boolean>>({});
   const task = data?.tasks.find((item) => item.id === taskId) || detail?.task;
+  const linkedAction = workspace.actions.find((action) => action.id === task?.actionId);
+  const uncertainAction = linkedAction?.status === "outcome_unknown" ? linkedAction : undefined;
   useEffect(() => {
     let active = true;
     void api
@@ -373,7 +375,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
     <Sheet
       title={task?.title || "Task"}
       subtitle={
-        task ? `${statusLabel(task.status)} · ${stamp(task.updatedAt)}` : "Loading saved progress…"
+        task
+          ? `${uncertainAction ? "Outcome unknown" : statusLabel(task.status)} · ${stamp(task.updatedAt)}`
+          : "Loading saved progress…"
       }
       onClose={close}
     >
@@ -386,19 +390,20 @@ export function TaskDetail({ taskId }: { taskId: string }) {
             {task.prompt}
           </Text>
           <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
-            {["queued", "running", "scheduled", "waiting_input", "waiting_approval"].includes(
-              task.status,
-            ) && (
-              <Button
-                small
-                icon={Pause}
-                busy={busy}
-                onPress={() => void act("control", { action: "pause" })}
-              >
-                Pause
-              </Button>
-            )}
-            {task.status === "paused" && (
+            {!uncertainAction &&
+              ["queued", "running", "scheduled", "waiting_input", "waiting_approval"].includes(
+                task.status,
+              ) && (
+                <Button
+                  small
+                  icon={Pause}
+                  busy={busy}
+                  onPress={() => void act("control", { action: "pause" })}
+                >
+                  Pause
+                </Button>
+              )}
+            {task.status === "paused" && !uncertainAction && (
               <Button
                 small
                 icon={Play}
@@ -408,17 +413,18 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 Resume
               </Button>
             )}
-            {task.status === "failed" && (
-              <Button
-                small
-                icon={RefreshCw}
-                busy={busy}
-                onPress={() => void act("control", { action: "retry" })}
-              >
-                Retry task
-              </Button>
-            )}
-            {activeTask(task) && (
+            {task.status === "failed" &&
+              (!task.actionId || linkedAction?.status === "succeeded") && (
+                <Button
+                  small
+                  icon={RefreshCw}
+                  busy={busy}
+                  onPress={() => void act("control", { action: "retry" })}
+                >
+                  Retry task
+                </Button>
+              )}
+            {activeTask(task) && !uncertainAction && (
               <Button
                 small
                 danger
@@ -430,7 +436,30 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               </Button>
             )}
           </View>
-          {task.status === "waiting_approval" && (
+          {uncertainAction && (
+            <Card style={{ backgroundColor: colors.orange, gap: 10 }}>
+              <Text style={s.heading}>Action outcome unknown</Text>
+              <Text style={s.muted}>
+                Check the connected app and this action before continuing the task.
+              </Text>
+              <Button small busy={busy} onPress={() => void review()}>
+                View linked action
+              </Button>
+            </Card>
+          )}
+          {task.status === "failed" && task.actionId && linkedAction?.status !== "succeeded" && (
+            <Card style={{ backgroundColor: colors.orange, gap: 10 }}>
+              <Text style={s.muted}>
+                This reviewed action cannot be retried. Check it before starting a new task.
+              </Text>
+              {linkedAction && (
+                <Button small busy={busy} onPress={() => void review()}>
+                  View linked action
+                </Button>
+              )}
+            </Card>
+          )}
+          {task.status === "waiting_approval" && !uncertainAction && (
             <Card style={{ backgroundColor: colors.lavender, gap: 12 }}>
               <Text style={s.heading}>Ready for your review</Text>
               <Text style={s.muted}>Review the exact action and account before it proceeds.</Text>
@@ -721,7 +750,7 @@ function FinanceArtifact({ artifact }: { artifact: AgentArtifact }) {
   const period = record(artifact.data.period);
   return (
     <Card
-      style={{ gap: 12, padding: 10, backgroundColor: "#EEEEF0", maxWidth: 440, width: "100%" }}
+      style={{ gap: 12, padding: 10, backgroundColor: colors.card, maxWidth: 440, width: "100%" }}
     >
       <Pressable
         accessibilityRole="button"
@@ -734,7 +763,7 @@ function FinanceArtifact({ artifact }: { artifact: AgentArtifact }) {
             minHeight: 200,
             borderRadius: 16,
             overflow: "hidden",
-            backgroundColor: "#080B10",
+            backgroundColor: colors.canvas,
             padding: 20,
           }}
         >
@@ -742,15 +771,15 @@ function FinanceArtifact({ artifact }: { artifact: AgentArtifact }) {
             <Svg width="100%" height="100%">
               <Defs>
                 <LinearGradient id="finance" x1="0" y1="0" x2="0.5" y2="1">
-                  <Stop offset="0" stopColor="#281066" />
-                  <Stop offset="0.5" stopColor="#163BBF" />
-                  <Stop offset="1" stopColor="#148CE8" />
+                  <Stop offset="0" stopColor={colors.canvas} />
+                  <Stop offset="0.5" stopColor={colors.card} />
+                  <Stop offset="1" stopColor={colors.line} />
                 </LinearGradient>
               </Defs>
               <Rect width="100%" height="100%" fill="url(#finance)" />
             </Svg>
           </View>
-          <Text style={{ color: "#D4DCFC", fontSize: 11, lineHeight: 18, marginBottom: 20 }}>
+          <Text style={{ color: colors.text, fontSize: 11, lineHeight: 18, marginBottom: 20 }}>
             Read from your imported transactions.{"\n"}
             {String(period?.from ?? "")} — {String(period?.to ?? "")}
             {"\n"}
@@ -766,9 +795,9 @@ function FinanceArtifact({ artifact }: { artifact: AgentArtifact }) {
             ).map(([label, key]) => (
               <View
                 key={key}
-                style={{ flex: 1, padding: 11, borderRadius: 12, backgroundColor: "#1D2025" }}
+                style={{ flex: 1, padding: 11, borderRadius: 12, backgroundColor: colors.card }}
               >
-                <Text style={{ color: "#A4A7AD", fontSize: 9 }}>{label}</Text>
+                <Text style={{ color: colors.muted, fontSize: 9 }}>{label}</Text>
                 <Text
                   selectable
                   numberOfLines={1}
@@ -777,13 +806,15 @@ function FinanceArtifact({ artifact }: { artifact: AgentArtifact }) {
                   style={{
                     fontSize: 17,
                     fontWeight: "600",
-                    color: key === "saved" ? "#58D3AE" : "#FFF",
+                    color: key === "saved" ? colors.blueDark : colors.text,
                     marginTop: 5,
                   }}
                 >
                   {amount(artifact.data[key])}
                 </Text>
-                <Text style={{ color: "#7E8289", fontSize: 8, marginTop: 4 }}>source currency</Text>
+                <Text style={{ color: colors.muted, fontSize: 8, marginTop: 4 }}>
+                  source currency
+                </Text>
               </View>
             ))}
           </View>
@@ -809,7 +840,7 @@ function FinanceArtifact({ artifact }: { artifact: AgentArtifact }) {
                   <Text style={s.text}>{String(row.name)}</Text>
                   <Text style={s.text}>{amount(row.amount)}</Text>
                 </View>
-                <View style={{ height: 7, backgroundColor: "#DFE8EB", borderRadius: 8 }}>
+                <View style={{ height: 7, backgroundColor: colors.line, borderRadius: 8 }}>
                   <View
                     style={{
                       width: `${Math.min(100, (Number(row.amount) / spending) * 100)}%`,
@@ -1156,11 +1187,11 @@ export function GoalsScreen() {
                 height: 16,
                 borderRadius: 8,
                 borderWidth: 5,
-                borderColor: "#D9F1E2",
-                backgroundColor: "#24A46B",
+                borderColor: colors.line,
+                backgroundColor: colors.blueDark,
               }}
             />
-            <Text style={[s.heading, { color: "#189A58" }]}>Tracking</Text>
+            <Text style={[s.heading, { color: colors.blueDark }]}>Tracking</Text>
           </View>
           <Button small icon={Plus} onPress={() => setAdding("Tracking")}>
             Track
@@ -1174,7 +1205,7 @@ export function GoalsScreen() {
             onPress={() => setSelectedMonitor(item.id)}
             style={[s.row, { gap: 12, paddingVertical: 13 }]}
           >
-            <Square size={21} color="#A7AAAC" />
+            <Square size={21} color={colors.muted} />
             <View style={{ flex: 1, gap: 4 }}>
               <Text style={s.text}>{item.title}</Text>
               <Text numberOfLines={1} style={s.muted}>
@@ -1183,7 +1214,7 @@ export function GoalsScreen() {
                   : statusLabel(item.status)}
               </Text>
             </View>
-            <ChevronRight size={18} color="#A3A6A8" />
+            <ChevronRight size={18} color={colors.muted} />
           </Pressable>
         ))}
         {!monitors.length && (
@@ -1206,8 +1237,8 @@ export function GoalsScreen() {
               height: 16,
               borderRadius: 8,
               borderWidth: 5,
-              borderColor: "#D7E9FA",
-              backgroundColor: "#3D9BDE",
+              borderColor: colors.line,
+              backgroundColor: colors.blueDark,
             }}
           />
           <Text style={[s.heading, { color: colors.blueDark }]}>Goals</Text>
@@ -1222,7 +1253,7 @@ export function GoalsScreen() {
           >
             <Square
               size={21}
-              color="#A7AAAC"
+              color={colors.muted}
               fill={item.status === "completed" ? colors.green : "transparent"}
             />
             <View style={{ flex: 1, gap: 4 }}>
@@ -1231,7 +1262,7 @@ export function GoalsScreen() {
                 {item.description || statusLabel(item.status)}
               </Text>
             </View>
-            <ChevronRight size={18} color="#A3A6A8" />
+            <ChevronRight size={18} color={colors.muted} />
           </Pressable>
         ))}
         {!data?.goals.length && (
@@ -1255,9 +1286,9 @@ export function GoalsScreen() {
           onPress={() => setAdding(item.name)}
           style={[s.row, { gap: 12, minHeight: 38 }]}
         >
-          <item.icon size={23} color="#989C9F" />
-          <Text style={[s.text, { flex: 1, color: "#666A6D" }]}>{item.name}</Text>
-          <Plus size={18} color="#989C9F" />
+          <item.icon size={23} color={colors.muted} />
+          <Text style={[s.text, { flex: 1, color: colors.muted }]}>{item.name}</Text>
+          <Plus size={18} color={colors.muted} />
         </Pressable>
       ))}
       {adding && (
@@ -1735,7 +1766,7 @@ export function AppsScreen() {
       />
       <ConnectionsScreen query={query} />
       <Text style={s.heading}>On your computer</Text>
-      <Card style={{ paddingVertical: 3, backgroundColor: "#F4F5F6" }}>
+      <Card style={{ paddingVertical: 3, backgroundColor: colors.card }}>
         {shortcuts
           .filter((item) =>
             `${item.title} ${item.detail}`.toLowerCase().includes(query.toLowerCase()),

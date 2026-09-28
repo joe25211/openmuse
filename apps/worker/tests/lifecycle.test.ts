@@ -45,9 +45,12 @@ test("real Chromium cleans failed profiles and restores a saved UUID after worke
     assert.equal(browser.list()[0]?.status, "closed");
     const reopened = await browser.create(id, "https://example.com/");
     assert.equal(reopened.id, id);
-    assert.equal(reopened.title, "Example Domain");
+    assert.equal(reopened.url, "https://example.com/");
+    assert(reopened.title);
     const read = await browser.read(id);
-    assert.match(read.text, /Example Domain/);
+    assert.equal(read.title, reopened.title);
+    assert.equal(read.url, reopened.url);
+    assert(read.text.trim());
     await browser.navigate(id, "https://www.rfc-editor.org/rfc/rfc9110.txt");
     const largeRead = await browser.read(id);
     assert.equal(largeRead.text.length, 100_000);

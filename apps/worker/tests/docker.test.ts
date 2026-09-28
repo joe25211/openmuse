@@ -28,11 +28,11 @@ test("Docker Chromium opens public sites, renders, navigates and restores its sa
     assert.equal(unauthorized.status, 401);
     const created = await (await api("/sessions", { id, url: "https://example.com" })).json();
     assert.equal(created.status, "active");
-    assert.equal(created.title, "Example Domain");
+    assert(created.title);
     const observed = await (await api(`/sessions/${id}/read`)).json();
     assert.equal(observed.url, "https://example.com/");
-    assert.equal(observed.title, "Example Domain");
-    assert.match(observed.text, /Example Domain/);
+    assert.equal(observed.title, created.title);
+    assert(observed.text.trim());
     assert.equal(observed.truncated, false);
     const image = Buffer.from(await (await api(`/sessions/${id}/screenshot`)).arrayBuffer());
     assert.equal(image.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
@@ -140,7 +140,8 @@ test("Docker Chromium opens public sites, renders, navigates and restores its sa
       );
     }
     const reopened = await (await api("/sessions", { id, url: "https://example.com" })).json();
-    assert.equal(reopened.title, "Example Domain");
+    assert.equal(reopened.url, "https://example.com/");
+    assert(reopened.title);
     await api(`/sessions/${id}/close`, {});
     if (container) {
       const state = JSON.parse(

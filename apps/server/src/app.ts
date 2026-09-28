@@ -10,6 +10,7 @@ import { ActionService } from "./actions.ts";
 import { agentConfigured, makeRuntime } from "./agent.ts";
 import { createAuth } from "./auth.ts";
 import { BrowserService } from "./browser.ts";
+import { ComposioService } from "./composio.ts";
 import { ComputerService, type DockerRunner } from "./computer.ts";
 import { computerRoutes } from "./computer-routes.ts";
 import { assertApiDeploymentConfig, type Config } from "./config.ts";
@@ -19,6 +20,7 @@ import { AgentService } from "./engine/service.ts";
 import { AppError } from "./errors.ts";
 import { Files } from "./files.ts";
 import { GoogleAuth } from "./google-auth.ts";
+import { OpenBotGateway } from "./openbot.ts";
 import { WorkspaceService } from "./workspace.ts";
 
 export async function createApp(
@@ -31,16 +33,31 @@ export async function createApp(
     files = new Files(db, config, auth),
     google = new GoogleAuth(db, config),
     workspace = new WorkspaceService(db, config, files, google);
+  const composio = new ComposioService(db, config);
+  const openbot = new OpenBotGateway(config);
   const actions = new ActionService(db, {
     execute: (owner, input, connectionId, targetVersion) =>
       workspace.execute(owner, input, connectionId, targetVersion),
     prepare: (owner, input, connectionId) => workspace.prepare(owner, input, connectionId),
     connected: (owner) => workspace.connected(owner),
     connection: (owner) => workspace.connection(owner),
+    composio: {
+      connection: (owner, input) => composio.connection(owner, input),
+      execute: (owner, input, connectionId) => composio.execute(owner, input, connectionId),
+    },
   });
   const browser = new BrowserService(db, config, auth, files);
   const computer = new ComputerService(db, config, options.docker);
-  const agent = new AgentService(db, config, workspace, files, actions, browser, computer);
+  const agent = new AgentService(
+    db,
+    config,
+    workspace,
+    files,
+    actions,
+    browser,
+    computer,
+    composio,
+  );
   const intelligence = new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
   const runtime = makeRuntime(config, agent, auth, intelligence);
   const app = new Hono<{ Variables: { owner: string } }>();
@@ -136,18 +153,77 @@ export async function createApp(
     await next();
   });
   app.get("/api/workspace", async (c) => {
-    const [snapshot, reachable] = await Promise.all([
+    const [snapshot, reachable, openbotProbe] = await Promise.all([
       workspace.snapshot(c.get("owner"), c.req.query("q")),
       browser.reachable(),
+      openbot.probe(),
     ]);
     snapshot.browsers = snapshot.browsers.map((s) => browser.decorate(c.get("owner"), s));
     // A configured worker that does not answer is offline, not ready.
     snapshot.connections = snapshot.connections.map((connection) =>
       connection.id === "browser" && connection.status === "connected" && !reachable
         ? { ...connection, status: "unavailable" }
-        : connection,
+        : connection.id === "openbot"
+          ? {
+              ...connection,
+              status:
+                openbotProbe.state === "authenticated"
+                  ? "connected"
+                  : openbotProbe.state === "disabled" || openbotProbe.state === "not_configured"
+                    ? "unconfigured"
+                    : "unavailable",
+              capabilities: ["OpenBot channels and Bot chat"],
+            }
+          : connection,
     );
+    snapshot.runtime.openbotConfigured = openbotProbe.state === "authenticated";
+    snapshot.connections.push({
+      id: "composio",
+      name: "Composio",
+      status: composio.configured ? "configured" : "unconfigured",
+      capabilities: ["Connected apps"],
+    });
     return c.json(snapshot);
+  });
+  app.get("/api/openbot/agents", async (c) => c.json(await openbot.agents()));
+  app.get("/api/openbot/channels", async (c) =>
+    c.json(await openbot.channels(z.string().max(2048).optional().parse(c.req.query("cursor")))),
+  );
+  app.post("/api/openbot/channels", async (c) => {
+    const { agentId } = z
+      .object({ agentId: z.string().trim().min(1).max(128) })
+      .parse(await c.req.json());
+    const channel = await openbot.createChannel(agentId);
+    return c.json({
+      channel: {
+        id: channel.channelId,
+        name: "",
+        threadId: channel.threadId,
+        agentIds: channel.agentIds,
+      },
+    });
+  });
+  app.all("/api/openbot/copilotkit/*", (c) =>
+    openbot.runtime(c.req.raw, c.req.path.slice("/api/openbot/copilotkit/".length)),
+  );
+  app.get("/api/composio/toolkits", async (c) => {
+    const search = z
+      .string()
+      .max(100)
+      .parse(c.req.query("search") ?? "");
+    const cursor = z.string().max(2048).optional().parse(c.req.query("cursor"));
+    return c.json(await composio.toolkits(c.get("owner"), search, cursor));
+  });
+  app.post("/api/composio/connect", async (c) => {
+    const { toolkit } = z
+      .object({
+        toolkit: z
+          .string()
+          .regex(/^[a-z][a-z0-9_]*$/)
+          .max(80),
+      })
+      .parse(await c.req.json());
+    return c.json(await composio.authorize(c.get("owner"), toolkit));
   });
   app.route("/api/agent", agentRoutes(agent));
   app.route("/api/computer", computerRoutes(computer, files));
@@ -184,6 +260,24 @@ export async function createApp(
       .parse(await c.req.json());
     return c.json(
       await actions.decide(c.get("owner"), c.req.param("id"), body.hash, body.decision),
+    );
+  });
+  app.post("/api/actions/:id/reconcile", async (c) => {
+    const body = z
+      .object({
+        hash: z.string().length(64),
+        outcome: z.enum(["completed", "not_completed"]),
+        note: z.string().trim().min(8).max(1000),
+      })
+      .parse(await c.req.json());
+    return c.json(
+      await actions.reconcile(
+        c.get("owner"),
+        c.req.param("id"),
+        body.hash,
+        body.outcome,
+        body.note,
+      ),
     );
   });
   app.get("/api/drafts", async (c) => c.json(await db.list(c.get("owner"), "drafts")));
@@ -347,5 +441,5 @@ export async function createApp(
   app.get("/", (c) =>
     c.json({ name: "OpenMuse", app: "http://localhost:8081", health: "/api/health" }),
   );
-  return { app, auth, files, actions, workspace, agent, computer };
+  return { app, auth, files, actions, workspace, agent, computer, composio };
 }

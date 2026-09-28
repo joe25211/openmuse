@@ -158,7 +158,7 @@ flowchart TD
   Tasks --> Computer
   Computer --> Volume[(Persistent workspace volume)]
   Tasks --> Files[PDF files + structured artifacts]
-  API -. future adapter .-> OpenBot[OpenBot]
+  API --> OpenBot[Optional local OpenBot chat gateway]
 ```
 
 | Directory | Purpose |
@@ -174,7 +174,7 @@ flowchart TD
 
 ### OpenBot compatibility
 
-OpenMuse's native client and personal-agent workflows are independent of OpenBot. The disabled OpenBot adapter is pinned and contract-tested against upstream interfaces. Live user/session bridging, routine mapping, and computer backend wiring remain future work. OpenBot's Intelligence runtime is not a raw AG-UI endpoint. [Integration contract](docs/OPENBOT-INTEGRATION.md).
+OpenMuse can list OpenBot Bots and channels and open a channel-backed native text chat through a local, single-user OpenBot deployment. Set `OPENBOT_ENABLED=true` and `OPENBOT_BASE_URL=http://127.0.0.1:3002` on the OpenMuse server, then use Apps → OpenBot. OpenBot's Intelligence runtime is not a raw AG-UI endpoint. OpenBot computer controls, multiuser sign-in, and scheduled routine mapping are not connected to the native client. [Current integration research](docs/OPENBOT-OFFICIAL-INTEGRATION-RESEARCH.md) · [Earlier adapter contract](docs/OPENBOT-INTEGRATION.md).
 
 ## Development
 

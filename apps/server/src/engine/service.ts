@@ -25,6 +25,7 @@ import type {
 } from "../../../../packages/domain/src/index.ts";
 import type { ActionService } from "../actions.ts";
 import type { BrowserService } from "../browser.ts";
+import type { ComposioService } from "../composio.ts";
 import { ComputerService } from "../computer.ts";
 import type { Config } from "../config.ts";
 import type { Store } from "../db.ts";
@@ -51,6 +52,7 @@ export class AgentService {
     readonly actions: ActionService,
     readonly browser: BrowserService,
     readonly computer: ComputerService = new ComputerService(db, config),
+    readonly composio?: ComposioService,
   ) {
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: (owner, task) => this.publishOutcome(owner, task),
@@ -230,6 +232,21 @@ export class AgentService {
   }
   async control(owner: string, id: string, action: "pause" | "resume" | "cancel" | "retry") {
     const task = await this.getTask(owner, id);
+    const linked = task.actionId
+      ? await this.db.get<ActionProposal>(owner, "actions", task.actionId)
+      : null;
+    if (linked?.status === "outcome_unknown")
+      throw new AppError(
+        "This action's outcome is unknown. Check the linked action and connected app before changing this task.",
+        409,
+      );
+    if (linked?.status === "executing")
+      throw new AppError(
+        "This action may still change the connected app. Check the linked action before changing this task.",
+        409,
+      );
+    if (action === "cancel" && linked?.status === "succeeded")
+      throw new AppError("This reviewed action already completed. Check its result first.", 409);
     if (action === "cancel" && task.status === "succeeded")
       throw new AppError("This task is already complete", 409);
     if (action === "retry" && task.status !== "failed")
@@ -253,6 +270,15 @@ export class AgentService {
           409,
         );
     }
+    // Claim denial on the Action row before cancelling; approval must lose that same claim.
+    if (action === "cancel" && linked?.status === "awaiting_review") {
+      const denied = await this.actions.decide(owner, linked.id, linked.hash, "deny");
+      if (denied.status !== "denied" && denied.status !== "expired")
+        throw new AppError(
+          "The reviewed action started; check its outcome before cancelling.",
+          409,
+        );
+    }
     const updated = await this.db.compareAndSwap<AgentTask>(
       owner,
       "tasks",
@@ -268,7 +294,9 @@ export class AgentService {
           action === "cancel"
             ? "Stopped by you."
             : action === "pause"
-              ? "Paused. Resume when you're ready."
+              ? task.actionId
+                ? "Task paused. A reviewed action may still finish; check it before resuming."
+                : "Paused. Resume when you're ready."
               : "",
         ...(task.kind === "monitor" && action === "resume"
           ? { state: { ...task.state, failures: 0, notice: null, resumingMonitor: false } }
@@ -290,11 +318,6 @@ export class AgentService {
           ...(action === "resume" || action === "retry" ? { error: null } : {}),
         },
       );
-    if (action === "cancel" && task.actionId) {
-      const proposal = await this.db.get<ActionProposal>(owner, "actions", task.actionId);
-      if (proposal?.status === "awaiting_review")
-        await this.actions.decide(owner, proposal.id, proposal.hash, "deny");
-    }
     await this.db.put(owner, "run-events", {
       id: randomUUID(),
       taskId: id,
@@ -698,12 +721,14 @@ export class AgentService {
     context: TaskContext,
   ) {
     await context.guard();
-    const connection = await this.workspace.connection(owner);
-    if (connection?.id !== task.state.connectionId)
-      throw new AppError(
-        "Google connection changed during this task. Start a new task using the current account.",
-        409,
-      );
+    if (input.kind !== "composio.execute") {
+      const connection = await this.workspace.connection(owner);
+      if (connection?.id !== task.state.connectionId)
+        throw new AppError(
+          "Google connection changed during this task. Start a new task using the current account.",
+          409,
+        );
+    }
     const proposal = await this.actions.propose(owner, input, `${task.id}:${key}`, task.id);
     if (proposal.status === "succeeded") return proposal;
     if (proposal.status !== "awaiting_review" && proposal.status !== "executing")
@@ -747,6 +772,21 @@ export class AgentService {
           state: { ...task.state, approvalResult: action.result },
           actionId: null,
         });
+      } else if (action.status === "outcome_unknown") {
+        const detail = `Action outcome unknown: ${action.error ?? "The provider did not confirm this change."} Check the connected app and linked action before continuing.`;
+        await context.event("error", "Action needs reconciliation", detail);
+        return {
+          status: "paused",
+          error: detail,
+          state: {
+            ...task.state,
+            notice: {
+              title: "Action needs reconciliation",
+              body: detail,
+              key: `action-unknown:${action.id}`,
+            },
+          },
+        };
       } else if (action.status !== "awaiting_review" && action.status !== "executing")
         throw new Error(
           `Reviewed action ${action.status}: ${action.error ?? "No further action was taken"}`,
@@ -834,6 +874,11 @@ export class AgentService {
     };
   }
   private async publishOutcome(owner: string, saved: AgentTask) {
+    // Reconciliation may win after the worker reads the Action but before it checkpoints the task.
+    if (saved.actionId) {
+      const action = await this.db.get<ActionProposal>(owner, "actions", saved.actionId);
+      if (action) await this.actions.syncReconciledTask(owner, action);
+    }
     const task = await this.getTask(owner, saved.id);
     if (task.status === "succeeded") {
       await this.notify(
