@@ -179,12 +179,17 @@ export class ComposioService {
         throw uncertainWrite();
       });
     if (result.error) throw uncertainWrite();
-    const encoded = JSON.stringify(result.data);
-    return JSON.stringify({
-      data: encoded.length > 30000 ? encoded.slice(0, 30000) : result.data,
-      truncated: encoded.length > 30000,
-      logId: result.logId,
-    });
+    try {
+      const data = result.data ?? null;
+      const encoded = JSON.stringify(data);
+      return JSON.stringify({
+        data: encoded.length > 30000 ? encoded.slice(0, 30000) : data,
+        truncated: encoded.length > 30000,
+        logId: result.logId,
+      });
+    } catch {
+      throw uncertainWrite();
+    }
   }
 
   private assertAppTool(tool: string, toolkit?: string) {

@@ -131,6 +131,40 @@ test("a resolved Composio write error stays outcome unknown and cannot dispatch 
   }
 });
 
+test("a no-content Composio write succeeds and malformed receipts stay outcome unknown", async () => {
+  const db = await createStore();
+  try {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    let calls = 0;
+    const sdk = composio(db, [], async () => (++calls === 1 ? {} : { data: circular }));
+    const service = new ActionService(db, {
+      connected: async () => true,
+      execute: async () => "unused",
+      composio: {
+        connection: (owner, input) => sdk.connection(owner, input),
+        execute: (owner, input, connectionId) => sdk.execute(owner, input, connectionId),
+      },
+    });
+    const input = {
+      kind: "composio.execute" as const,
+      data: { toolkit: "github", tool: "GITHUB_CREATE_ISSUE", args: { title: "Fix bug" } },
+    };
+    const empty = await service.propose("owner", input);
+    const succeeded = await service.decide("owner", empty.id, empty.hash, "approve");
+    assert.equal(succeeded.status, "succeeded");
+    assert.deepEqual(JSON.parse(succeeded.result ?? ""), { data: null, truncated: false });
+
+    const malformed = await service.propose("owner", input);
+    const unknown = await service.decide("owner", malformed.id, malformed.hash, "approve");
+    assert.equal(unknown.status, "outcome_unknown");
+    assert.match(unknown.error ?? "", /may have completed/);
+    assert.equal(calls, 2);
+  } finally {
+    await db.close();
+  }
+});
+
 test("an AgentTask with an uncertain linked action pauses until reconciliation", async () => {
   const directory = await mkdtemp(join(tmpdir(), "openmuse-uncertain-task-"));
   const db = await createStore();
