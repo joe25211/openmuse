@@ -374,6 +374,7 @@ export class OpenBotAdapter {
                   ? { cursor }
                   : {}),
                 ...(event.type === "TEXT_MESSAGE_START" &&
+                event.role === "assistant" &&
                 "messageId" in event &&
                 typeof event.messageId === "string"
                   ? { messageId: event.messageId }

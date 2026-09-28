@@ -91,14 +91,27 @@ test("a saved answer must have a message ID emitted by the matching run", async 
     () =>
       new Observable((subscriber) => {
         subscriber.next({ type: "RUN_STARTED", threadId: "thread-1", runId: "run-1" });
+        subscriber.next({ type: "TEXT_MESSAGE_START", role: "user", messageId: "user-1" });
         subscriber.next({ type: "TEXT_MESSAGE_START", role: "assistant", messageId: "answer-1" });
         subscriber.next({ type: "TEXT_MESSAGE_END", messageId: "answer-1" });
         subscriber.next({ type: "RUN_FINISHED", threadId: "thread-1", runId: "run-1" });
         subscriber.complete();
       }),
   );
-  const run = await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {});
+  const observedIds: string[] = [];
+  const run = await adapter.runText(
+    "bot-1",
+    "thread-1",
+    "run-1",
+    "Task only",
+    async () => {},
+    undefined,
+    async (event) => {
+      if (event.messageId) observedIds.push(event.messageId);
+    },
+  );
   assert.deepEqual(run, { terminal: "finished", messageIds: ["answer-1"] });
+  assert.deepEqual(observedIds, ["answer-1"]);
   assert.equal(await adapter.textResult("bot-1", "thread-1", run.messageIds), "The linked answer");
   assert.equal(await adapter.textResult("bot-1", "thread-1", ["missing"]), "");
 });

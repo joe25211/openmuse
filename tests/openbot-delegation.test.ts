@@ -279,6 +279,28 @@ test("overprivileged Bot is refused and uncertain submission is never resent", a
     clock += 5 * 60_000 + 5000;
     await f.server.agent.worker.tick();
     assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.status, "outcome_unknown");
+    const transportLostAt = (await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.delegation
+      ?.transportLostAt;
+    assert(transportLostAt);
+    t.mock.method(
+      gateway,
+      "reconnectRun",
+      async (
+        _bot: string,
+        _thread: string,
+        _run: string,
+        _cursor: string | undefined,
+        onEvent: (event: { type: string; cursor?: string }) => Promise<void>,
+      ) => {
+        await onEvent({ type: "TEXT_MESSAGE_END", cursor: "old-event" });
+        return { terminal: "unconfirmed" as const, messageIds: [] };
+      },
+    );
+    clock += 6000;
+    await f.server.agent.worker.tick();
+    const replayed = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(replayed?.status, "outcome_unknown");
+    assert.equal(replayed.delegation?.transportLostAt, transportLostAt);
     assert.equal(
       (await f.db.list<{ title: string }>(f.owner, "notifications")).filter(
         (n) => n.title === "Outcome unknown",

@@ -1005,8 +1005,7 @@ export class AgentService {
         !delegation.delayedAt
       )
         await save({ delayedAt: now() });
-      if (delegation.transportLostAt && task.status === "outcome_unknown")
-        return { status: "outcome_unknown", delegation };
+      if (task.status === "outcome_unknown") return { status: "outcome_unknown", delegation };
       return { status: "running", error: null, delegation };
     };
     const observe = async (event: OpenBotRunObservation) => {
@@ -1014,7 +1013,7 @@ export class AgentService {
       await save({
         lastProgressAt: now(),
         lastProgress: event.type,
-        transportLostAt: undefined,
+        transportLostAt: task.status === "outcome_unknown" ? delegation.transportLostAt : undefined,
         delayedAt: undefined,
         ...(event.cursor ? { replayCursor: event.cursor } : {}),
         ...(event.messageId
