@@ -96,7 +96,7 @@ const hostSchema = z.object({
   pending: z.array(z.object({ botId: nonempty })),
 });
 const historySchema = z.object({
-  messages: z.array(z.object({ role: z.string(), content: z.unknown() })),
+  messages: z.array(z.object({ id: nonempty, role: z.string(), content: z.unknown() })),
 });
 const errorSchema = z.object({ error: z.string().optional(), rule: z.string().optional() });
 
@@ -206,7 +206,7 @@ export class OpenBotAdapter {
     text: string,
     onStartup: () => Promise<void>,
     signal?: AbortSignal,
-  ): Promise<"finished" | "error" | "unconfirmed"> {
+  ): Promise<{ terminal: "finished" | "error" | "unconfirmed"; messageIds: string[] }> {
     const transport = this.requireTransport();
     if (!transport.socketUrl)
       throw new OpenBotError("not_configured", "OpenBot realtime is unavailable.");
@@ -253,15 +253,30 @@ export class OpenBotAdapter {
     };
     return new Promise((resolve, reject) => {
       let settled = false;
+      let started = false;
+      const messageIds: string[] = [];
       let subscription: Subscription | undefined;
       const finish = (result: "finished" | "error" | "unconfirmed") => {
         if (settled) return;
         settled = true;
         subscription?.unsubscribe();
-        resolve(result);
+        resolve({ terminal: result, messageIds });
       };
       subscription = agent.run(input).subscribe({
         next: (event) => {
+          if (event.type === "RUN_STARTED") {
+            started = event.threadId === threadId && event.runId === runId;
+            return;
+          }
+          if (
+            event.type === "TEXT_MESSAGE_START" &&
+            started &&
+            event.role === "assistant" &&
+            typeof event.messageId === "string"
+          ) {
+            messageIds.push(event.messageId);
+            return;
+          }
           if (event.type !== "RUN_FINISHED" && event.type !== "RUN_ERROR") return;
           if (event.threadId !== threadId || event.runId !== runId) return;
           finish(event.type === "RUN_FINISHED" ? "finished" : "error");
@@ -278,13 +293,18 @@ export class OpenBotAdapter {
     });
   }
 
-  async textResult(botId: string, threadId: string): Promise<string> {
+  async textResult(botId: string, threadId: string, messageIds: string[]): Promise<string> {
+    if (!messageIds.length) return "";
     const history = await this.json(
       `/api/copilotkit/threads/${encodeURIComponent(identifier(threadId))}/messages?agentId=${encodeURIComponent(identifier(botId))}`,
       historySchema,
     );
-    const assistant = history.messages.filter((message) => message.role === "assistant").at(-1);
-    return typeof assistant?.content === "string" ? assistant.content.trim() : "";
+    const ids = new Set(messageIds);
+    const answers = history.messages
+      .filter((message) => message.role === "assistant" && ids.has(message.id))
+      .map((message) => (typeof message.content === "string" ? message.content.trim() : ""))
+      .filter(Boolean);
+    return answers.length === ids.size ? answers.join("\n\n") : "";
   }
 
   async computerStatus(botId: string, signal?: AbortSignal): Promise<OpenBotComputerStatus> {

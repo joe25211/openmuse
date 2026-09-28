@@ -24,6 +24,7 @@ export interface TaskDelegation {
   submissionAttempted: boolean;
   startupAcknowledged?: boolean;
   terminal?: "finished" | "error";
+  messageIds?: string[];
   output?: string;
 }
 export interface Evidence {

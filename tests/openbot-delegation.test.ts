@@ -94,6 +94,9 @@ test("authenticated named Bot task persists its attempt before dispatch and relo
   try {
     const gateway = f.server.agent.openbot;
     assert(gateway);
+    const intelligence = f.server.agent.intelligence;
+    assert(intelligence);
+    t.mock.method(intelligence, "listThreads", async () => ({ threads: [], joinCode: "test" }));
     const input = {
       requestId: "request-1",
       botId: "Notes Bot",
@@ -129,7 +132,7 @@ test("authenticated named Bot task persists its attempt before dispatch and relo
         assert.equal(botId, "bot-1");
         assert.equal(text, "Task: Summarize this text\nRelevant brief: It is about a garden.");
         await onStartup();
-        return "finished" as const;
+        return { terminal: "finished" as const, messageIds: ["answer-1"] };
       },
     );
     t.mock.method(gateway, "textResult", async () => "A garden summary.");
@@ -144,26 +147,85 @@ test("authenticated named Bot task persists its attempt before dispatch and relo
     assert.equal(saved.status, "succeeded");
     assert.equal(saved.result, "A garden summary.");
     assert.equal(saved.delegation?.terminal, "finished");
+    assert.deepEqual(saved.delegation?.messageIds, ["answer-1"]);
     assert.equal(saved.delegation?.output, "A garden summary.");
-    const interrupted = {
-      requestId: "crash-before-link",
-      botId: "bot-1",
-      prompt: "Crash-safe request",
-    };
-    const held = await f.server.agent.createTask(
-      f.owner,
-      {
-        kind: "agent",
-        prompt: interrupted.prompt,
-        input: { delegatedSentContext: `Task: ${interrupted.prompt}` },
+  } finally {
+    await f.close();
+  }
+});
+
+test("side and local conversations require an owner-scoped conversation", async (t) => {
+  const f = await fixture();
+  try {
+    const intelligence = f.server.agent.intelligence;
+    assert(intelligence);
+    const listed = t.mock.method(
+      intelligence,
+      "listThreads",
+      async ({ userId, agentId, cursor }: { userId: string; agentId: string; cursor?: string }) => {
+        assert.equal(userId, f.owner);
+        assert.equal(agentId, "default");
+        return cursor
+          ? {
+              threads: [{ id: "side-1", agentId: "default", createdById: f.owner }],
+              joinCode: "test",
+            }
+          : { threads: [], joinCode: "test", nextCursor: "page-2" };
       },
-      `openbot:conversation-1:${interrupted.requestId}`,
-      true,
     );
-    assert.equal(held.status, "paused");
-    const resumed = await f.request("conversation-1", interrupted);
-    assert.equal(resumed.status, 201);
-    assert.equal(((await resumed.json()) as AgentTask).kind, "openbot");
+    const input = { requestId: "side-request", botId: "bot-1", prompt: "Summarize notes" };
+    assert.equal((await f.request("side-1", input)).status, 201);
+    assert.equal((await f.request("foreign-side", input)).status, 404);
+    assert.equal(listed.mock.callCount(), 4);
+    assert.equal((await f.request("local-main", input)).status, 404);
+    await f.db.put(f.owner, "conversations", { id: "default", messages: [] });
+    assert.equal((await f.request("local-main", input)).status, 201);
+  } finally {
+    await f.close();
+  }
+});
+
+test("the first task insert is fully delegated even if the response is lost", async (t) => {
+  const f = await fixture();
+  try {
+    const original = f.db.insertIfAbsent.bind(f.db);
+    let interrupted = false;
+    t.mock.method(
+      f.db,
+      "insertIfAbsent",
+      async (owner: string, collection: string, value: { id: string }) => {
+        const result = await original(owner, collection, value);
+        if (collection === "tasks" && !interrupted) {
+          interrupted = true;
+          const saved = value as AgentTask;
+          assert.equal(saved.kind, "openbot");
+          assert.equal(saved.status, "queued");
+          assert.equal(saved.delegation?.submissionAttempted, false);
+          throw new Error("response lost after insert");
+        }
+        return result;
+      },
+    );
+    const input = { requestId: "insert-crash", botId: "bot-1", prompt: "One answer" };
+    assert.equal((await f.request("conversation-1", input)).status, 502);
+    const [first, duplicate] = await Promise.all([
+      f.request("conversation-1", input),
+      f.request("conversation-1", input),
+    ]);
+    assert.equal(first.status, 201);
+    assert.equal(duplicate.status, 201);
+    const task = (await first.json()) as AgentTask;
+    assert.equal(((await duplicate.json()) as AgentTask).delegation?.runId, task.delegation?.runId);
+    assert.equal((await f.db.list<AgentTask>(f.owner, "tasks")).length, 1);
+    const concurrent = { ...input, requestId: "concurrent-insert" };
+    const [a, b] = await Promise.all([
+      f.request("conversation-1", concurrent),
+      f.request("conversation-1", concurrent),
+    ]);
+    assert.equal(a.status, 201);
+    assert.equal(b.status, 201);
+    assert.equal(((await a.json()) as AgentTask).id, ((await b.json()) as AgentTask).id);
+    assert.equal((await f.db.list<AgentTask>(f.owner, "tasks")).length, 2);
   } finally {
     await f.close();
   }
@@ -212,7 +274,10 @@ test("confirmed error and empty answer do not complete a delegated task", async 
     const gateway = f.server.agent.openbot;
     assert(gateway);
     const outcomes: Array<"error" | "finished"> = ["error", "finished"];
-    t.mock.method(gateway, "runText", async () => outcomes.shift() ?? "unconfirmed");
+    t.mock.method(gateway, "runText", async () => ({
+      terminal: outcomes.shift() ?? "unconfirmed",
+      messageIds: ["answer-1"],
+    }));
     t.mock.method(gateway, "textResult", async () => "");
     for (const requestId of ["error", "empty"]) {
       const response = await f.request("conversation-1", {

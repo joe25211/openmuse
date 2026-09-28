@@ -112,8 +112,8 @@ export class OpenBotGateway {
     return this.adapter.runText(botId, threadId, runId, text, onStartup, signal);
   }
 
-  textResult(botId: string, threadId: string) {
-    return this.adapter.textResult(botId, threadId);
+  textResult(botId: string, threadId: string, messageIds: string[]) {
+    return this.adapter.textResult(botId, threadId, messageIds);
   }
 
   channels(cursor?: string) {

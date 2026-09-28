@@ -48,6 +48,7 @@ export async function createApp(
   });
   const browser = new BrowserService(db, config, auth, files);
   const computer = new ComputerService(db, config, options.docker);
+  const intelligence = new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
   const agent = new AgentService(
     db,
     config,
@@ -58,8 +59,8 @@ export async function createApp(
     computer,
     composio,
     openbot,
+    intelligence,
   );
-  const intelligence = new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
   const runtime = makeRuntime(config, agent, auth, intelligence);
   const app = new Hono<{ Variables: { owner: string } }>();
   const origins = new Set([...config.allowedOrigins, new URL(config.publicUrl).origin]);

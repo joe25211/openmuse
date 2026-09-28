@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { CopilotKitIntelligence } from "@copilotkit/runtime/v2";
 import { z } from "zod";
 import {
   type AgentArtifact,
@@ -56,6 +57,7 @@ export class AgentService {
     readonly computer: ComputerService = new ComputerService(db, config),
     readonly composio?: ComposioService,
     readonly openbot?: OpenBotGateway,
+    readonly intelligence?: CopilotKitIntelligence,
   ) {
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: (owner, task) => this.publishOutcome(owner, task),
@@ -244,14 +246,44 @@ export class AgentService {
     },
   ) {
     const main = await this.db.get<{ threadId: string }>(owner, "conversation-settings", "main");
-    if (!main || main.threadId !== input.conversationId)
-      throw new AppError("Conversation not found", 404);
+    if (main?.threadId !== input.conversationId) {
+      const local =
+        (input.conversationId === "local" || input.conversationId === "local-main") &&
+        (await this.db.get(owner, "conversations", "default"));
+      if (!local) {
+        if (!this.intelligence) throw new AppError("Conversation not found", 404);
+        try {
+          let cursor: string | undefined;
+          let found = false;
+          do {
+            const page = await this.intelligence.listThreads({
+              userId: owner,
+              agentId: "default",
+              ...(cursor ? { cursor } : {}),
+            });
+            found = page.threads.some(
+              (thread) =>
+                thread.id === input.conversationId &&
+                thread.agentId === "default" &&
+                thread.createdById === owner,
+            );
+            cursor = page.nextCursor ?? undefined;
+            if (found) break;
+          } while (cursor);
+          if (!found) throw new AppError("Conversation not found", 404);
+        } catch (error) {
+          if (error instanceof AppError) throw error;
+          throw new AppError("Conversation ownership could not be verified", 502);
+        }
+      }
+    }
     const sentContext = `Task: ${input.prompt.trim()}${input.brief?.trim() ? `\nRelevant brief: ${input.brief.trim()}` : ""}`;
     const key = `openbot:${input.conversationId}:${input.requestId}`;
     const id = hash(`task:${key}`);
     const existing = await this.db.get<AgentTask>(owner, "tasks", id);
-    if (existing?.delegation) {
+    if (existing) {
       if (
+        !existing.delegation ||
         (existing.delegation.botId !== input.botId &&
           existing.delegation.botName.toLowerCase() !== input.botId.toLowerCase()) ||
         existing.delegation.sentContext !== sentContext
@@ -259,68 +291,48 @@ export class AgentService {
         throw new AppError("This request already has a different task", 409);
       return existing;
     }
-    if (
-      existing &&
-      (existing.status !== "paused" ||
-        existing.kind !== "agent" ||
-        existing.input.delegatedSentContext !== sentContext)
-    )
-      throw new AppError("This request already has a different task", 409);
     if (!this.openbot) throw new AppError("OpenBot is unavailable", 503);
     const bot = await this.openbot.eligibleBot(input.botId);
-    const held =
-      existing ??
-      (await this.createTask(
-        owner,
-        {
-          kind: "agent",
-          prompt: input.prompt,
-          title: input.prompt.slice(0, 90),
-          input: { delegatedSentContext: sentContext },
-        },
-        key,
-        true,
-      ));
-    if (held.delegation) {
-      if (
-        held.delegation.sentContext !== sentContext ||
-        (held.delegation.botId !== bot.id &&
-          held.delegation.botName.toLowerCase() !== input.botId.toLowerCase())
-      )
-        throw new AppError("This request already has a different task", 409);
-      return held;
-    }
-    const task = await this.db.compareAndSwap<AgentTask>(
-      owner,
-      "tasks",
-      held.id,
-      {
-        status: "paused",
-        leaseId: null,
-        kind: "agent",
-        input: { delegatedSentContext: sentContext },
+    if (
+      (await this.db.list<AgentTask>(owner, "tasks")).filter((t) => !terminal.has(t.status))
+        .length >= 100
+    )
+      throw new AppError("Finish or cancel some tasks before adding more", 409);
+    const task: AgentTask = {
+      id,
+      title: input.prompt.slice(0, 90),
+      prompt: input.prompt,
+      kind: "openbot",
+      status: "queued",
+      plan: [],
+      evidence: [],
+      input: {},
+      state: { connectionId: (await this.workspace.connection(owner))?.id ?? null },
+      createdAt: date(),
+      updatedAt: date(),
+      attempts: 0,
+      leaseId: null,
+      leaseUntil: null,
+      artifactIds: [],
+      delegation: {
+        conversationId: input.conversationId,
+        requestId: input.requestId,
+        botId: bot.id,
+        botName: bot.name,
+        sentContext,
+        runId: randomUUID(),
+        channelAttempted: false,
+        submissionAttempted: false,
       },
-      {
-        kind: "openbot",
-        status: "queued",
-        plan: [],
-        input: {},
-        delegation: {
-          conversationId: input.conversationId,
-          requestId: input.requestId,
-          botId: bot.id,
-          botName: bot.name,
-          sentContext,
-          runId: randomUUID(),
-          channelAttempted: false,
-          submissionAttempted: false,
-        },
-        updatedAt: date(),
-      },
-    );
-    if (task) return task;
-    const latest = await this.getTask(owner, held.id);
-    if (latest.delegation?.sentContext !== sentContext || latest.delegation.botId !== bot.id)
+    };
+    await this.ensure(owner);
+    await this.db.insertIfAbsent(owner, "tasks", task);
+    const latest = await this.getTask(owner, id);
+    if (
+      latest.delegation?.sentContext !== sentContext ||
+      latest.delegation.botId !== bot.id ||
+      latest.delegation.conversationId !== input.conversationId
+    )
       throw new AppError("This request already has a different task", 409);
     return latest;
   }
@@ -1001,9 +1013,9 @@ export class AgentService {
       };
     }
     await save({ submissionAttempted: true });
-    let terminal: "finished" | "error" | "unconfirmed";
+    let run: Awaited<ReturnType<OpenBotGateway["runText"]>>;
     try {
-      terminal = await gateway.runText(
+      run = await gateway.runText(
         delegation.botId,
         channel.threadId,
         delegation.runId,
@@ -1016,13 +1028,13 @@ export class AgentService {
         "OpenBot submission or realtime outcome was not confirmed. Check the original run.",
       );
     }
-    if (terminal === "unconfirmed")
+    if (run.terminal === "unconfirmed")
       return unknown("OpenBot did not provide a matching terminal event.");
-    await save({ terminal });
-    if (terminal === "error")
+    await save({ terminal: run.terminal, messageIds: run.messageIds });
+    if (run.terminal === "error")
       return { status: "failed", error: "The linked OpenBot run reported an error", delegation };
     try {
-      const output = await gateway.textResult(delegation.botId, channel.threadId);
+      const output = await gateway.textResult(delegation.botId, channel.threadId, run.messageIds);
       if (!output)
         return {
           status: "failed",

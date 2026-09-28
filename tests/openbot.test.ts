@@ -64,14 +64,43 @@ test("only a terminal matching the saved thread and run can settle a delegated a
   );
   transport.socketUrl = "ws://openbot.example/socket";
   assert.equal(
-    await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {}),
+    (await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {})).terminal,
     "unconfirmed",
   );
   events.push({ type: "RUN_FINISHED", threadId: "thread-1", runId: "run-1" });
   assert.equal(
-    await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {}),
+    (await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {})).terminal,
     "finished",
   );
+});
+
+test("a saved answer must have a message ID emitted by the matching run", async (t) => {
+  const { adapter, transport } = fixture((path) => {
+    assert.match(path, /\/messages\?/);
+    return Response.json({
+      messages: [
+        { id: "answer-1", role: "assistant", content: "The linked answer" },
+        { id: "other-answer", role: "assistant", content: "Another native chat reply" },
+      ],
+    });
+  });
+  transport.socketUrl = "ws://openbot.example/socket";
+  t.mock.method(
+    IntelligenceAgent.prototype,
+    "run",
+    () =>
+      new Observable((subscriber) => {
+        subscriber.next({ type: "RUN_STARTED", threadId: "thread-1", runId: "run-1" });
+        subscriber.next({ type: "TEXT_MESSAGE_START", role: "assistant", messageId: "answer-1" });
+        subscriber.next({ type: "TEXT_MESSAGE_END", messageId: "answer-1" });
+        subscriber.next({ type: "RUN_FINISHED", threadId: "thread-1", runId: "run-1" });
+        subscriber.complete();
+      }),
+  );
+  const run = await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {});
+  assert.deepEqual(run, { terminal: "finished", messageIds: ["answer-1"] });
+  assert.equal(await adapter.textResult("bot-1", "thread-1", run.messageIds), "The linked answer");
+  assert.equal(await adapter.textResult("bot-1", "thread-1", ["missing"]), "");
 });
 
 test("OpenBot is disabled by default and cannot call a supplied transport", async () => {
