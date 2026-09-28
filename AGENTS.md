@@ -12,6 +12,6 @@ Delegate independent, bounded work with a clear scope and done criteria. Keep on
 
 ## Code Review Rules
 
-- **OpenBot task boundary:** Keep OpenBot channel chat separate from durable OpenMuse AgentTask execution. Channel creation or a successful chat reply alone does not establish delegated-task dispatch, recovery, or completion; require an explicit task-to-run link when adding that capability.
-- **Reviewed actions:** Route OpenBot browser, computer, file, and shell actions through the OpenMuse server gateway with policy checks and recorded decisions. Execute a persistent external change only after OpenMuse durably approves the exact proposed action; an OpenBot grant alone is insufficient.
-- **Uncertain outcomes:** Preserve a nonterminal, outcome-unknown state for unconfirmed stops and ambiguous external mutations. Reconcile the original run or action before retrying; a repeated request must not duplicate a change, and a late result must not overwrite the reconciled state.
+- **OpenBot task boundary:** Native OpenBot channel chat uses OpenBot grants and is separate from durable OpenMuse AgentTask execution. A delegated AgentTask needs an explicit task-to-run link; channel creation or a chat reply does not establish dispatch, recovery, or completion.
+- **Reviewed actions:** For delegated AgentTasks, scope browser, computer, file, and shell tools at the server boundary. Execute a persistent external change only after OpenMuse durably approves the exact proposed action; an OpenBot grant alone is insufficient.
+- **Uncertain outcomes:** Keep delegated AgentTasks and reviewed Actions nonterminal while a stop or external mutation is unconfirmed. Reconcile the original run or action before retrying; a repeated request must not duplicate a change, and a late result must not overwrite the reconciled state.

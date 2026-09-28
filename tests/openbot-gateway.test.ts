@@ -55,6 +55,9 @@ test("OpenBot gateway forwards a channel run without forwarding the OpenMuse ses
       durableHistory: true,
       generativeUi: true,
     });
+    await Promise.all([gateway.probe(), gateway.probe()]);
+    assert.equal(requests.filter((request) => request.path === "/api/me").length, 1);
+    assert.equal(requests.filter((request) => request.path === "/api/capabilities").length, 1);
     assert.deepEqual(await gateway.createChannel("bot-1"), {
       channelId: "channel-1",
       threadId: "thread-1",

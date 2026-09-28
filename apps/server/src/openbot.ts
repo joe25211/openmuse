@@ -28,6 +28,7 @@ const channelsSchema = z.object({
 export class OpenBotGateway {
   private readonly base?: URL;
   private readonly adapter: OpenBotAdapter;
+  private probeCache?: { expiresAt: number; result: ReturnType<OpenBotAdapter["probe"]> };
 
   constructor(config: Config) {
     if (config.openbotEnabled) {
@@ -58,7 +59,14 @@ export class OpenBotGateway {
   }
 
   probe() {
-    return this.adapter.probe(AbortSignal.timeout(3000));
+    const now = Date.now();
+    if (this.probeCache && this.probeCache.expiresAt > now) return this.probeCache.result;
+    const result = this.adapter.probe(AbortSignal.timeout(3000)).catch((error) => {
+      if (this.probeCache?.result === result) this.probeCache = undefined;
+      throw error;
+    });
+    this.probeCache = { expiresAt: now + 30_000, result };
+    return result;
   }
 
   async agents() {
