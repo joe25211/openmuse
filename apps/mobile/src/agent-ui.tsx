@@ -282,9 +282,8 @@ export function TaskDetail({ taskId }: { taskId: string }) {
   const [showFieldJson, setShowFieldJson] = useState(false);
   const [fields, setFields] = useState<Record<string, string | boolean>>({});
   const task = data?.tasks.find((item) => item.id === taskId) || detail?.task;
-  const uncertainAction = workspace.actions.find(
-    (action) => action.id === task?.actionId && action.status === "outcome_unknown",
-  );
+  const linkedAction = workspace.actions.find((action) => action.id === task?.actionId);
+  const uncertainAction = linkedAction?.status === "outcome_unknown" ? linkedAction : undefined;
   useEffect(() => {
     let active = true;
     void api
@@ -414,7 +413,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 Resume
               </Button>
             )}
-            {task.status === "failed" && (
+            {task.status === "failed" && (!task.actionId || linkedAction?.status === "succeeded") && (
               <Button
                 small
                 icon={RefreshCw}
@@ -445,6 +444,18 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               <Button small busy={busy} onPress={() => void review()}>
                 View linked action
               </Button>
+            </Card>
+          )}
+          {task.status === "failed" && task.actionId && linkedAction?.status !== "succeeded" && (
+            <Card style={{ backgroundColor: colors.orange, gap: 10 }}>
+              <Text style={s.muted}>
+                This reviewed action cannot be retried. Check it before starting a new task.
+              </Text>
+              {linkedAction && (
+                <Button small busy={busy} onPress={() => void review()}>
+                  View linked action
+                </Button>
+              )}
             </Card>
           )}
           {task.status === "waiting_approval" && !uncertainAction && (
