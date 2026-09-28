@@ -5,6 +5,7 @@ import type { Artifact, BrowserSession } from "../../../packages/domain/src";
 import type { AgentArtifact, AgentTask } from "../../../packages/domain/src/agent";
 import { ArtifactCard, TaskCard } from "./agent-ui";
 import { BrowserThreadCard } from "./computer";
+import { freshestTask } from "./delegated-chat";
 import { Button, Card, colors, ErrorNotice, s } from "./ui";
 import { useWorkspace } from "./workspace";
 
@@ -93,9 +94,10 @@ export function TaskThreadCard({ task }: { task: AgentTask }) {
     };
   }, [api, task.id, task.updatedAt, attempt]);
   const currentDetail = detail?.task.id === task.id ? detail : undefined;
+  const savedTask = freshestTask(task, currentDetail?.task);
   return (
     <View style={{ gap: 12 }}>
-      <TaskCard task={currentDetail?.task ?? task} compact />
+      <TaskCard task={savedTask} compact />
       {currentDetail?.browsers.map((browser) => (
         <BrowserThreadCard key={browser.id} browser={browser} />
       ))}
