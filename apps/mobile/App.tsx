@@ -264,7 +264,7 @@ function WorkspaceShell({
   error: string;
   prompt?: { id: number; text: string };
 }) {
-  const { section, navigate, open, openBotChannel: openbotChannel } = useWorkspace();
+  const { workspace, section, navigate, open, openBotChannel: openbotChannel } = useWorkspace();
   const { data } = useAgentWorkspace();
   const {
     selection,
@@ -278,7 +278,14 @@ function WorkspaceShell({
   const [threadsOpen, setThreadsOpen] = useState(false);
   const { width } = useWindowDimensions();
   const desktop = width >= 900;
-  const unread = data?.notifications.filter((n) => !n.read).length || 0;
+  const pending =
+    new Set([
+      ...workspace.actions.filter((action) => action.status === "awaiting_review").map((a) => a.id),
+      ...(data?.tasks.flatMap((task) =>
+        task.status === "waiting_approval" && task.actionId ? [task.actionId] : [],
+      ) ?? []),
+    ]).size +
+    (data?.notifications.filter((n) => !n.read && n.title !== "Ready for your review").length ?? 0);
   const activeTask =
     data?.tasks.find(
       (task) => task.status === "waiting_approval" || task.status === "waiting_input",
@@ -365,10 +372,10 @@ function WorkspaceShell({
           <View style={{ position: "absolute", right: 0, top: 16 }}>
             <IconButton
               icon={Bell}
-              label={`Notifications, ${unread} unread`}
+              label={`Notifications, ${pending} unread or pending`}
               onPress={() => open({ type: "notifications" })}
             />
-            {unread > 0 && (
+            {pending > 0 && (
               <View
                 pointerEvents="none"
                 style={{
