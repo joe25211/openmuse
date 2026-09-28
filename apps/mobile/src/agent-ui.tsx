@@ -413,16 +413,17 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 Resume
               </Button>
             )}
-            {task.status === "failed" && (!task.actionId || linkedAction?.status === "succeeded") && (
-              <Button
-                small
-                icon={RefreshCw}
-                busy={busy}
-                onPress={() => void act("control", { action: "retry" })}
-              >
-                Retry task
-              </Button>
-            )}
+            {task.status === "failed" &&
+              (!task.actionId || linkedAction?.status === "succeeded") && (
+                <Button
+                  small
+                  icon={RefreshCw}
+                  busy={busy}
+                  onPress={() => void act("control", { action: "retry" })}
+                >
+                  Retry task
+                </Button>
+              )}
             {activeTask(task) && !uncertainAction && (
               <Button
                 small
