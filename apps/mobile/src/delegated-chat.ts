@@ -2,6 +2,12 @@ import type { AgentTask } from "../../../packages/domain/src/agent";
 
 export type DelegatedPane = "chat" | "task";
 
+export function taskForConversation(tasks: AgentTask[], conversationId: string) {
+  return [...tasks]
+    .filter((task) => task.delegation?.conversationId === conversationId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+}
+
 export function paneAfterHorizontalGesture(
   dx: number,
   dy: number,

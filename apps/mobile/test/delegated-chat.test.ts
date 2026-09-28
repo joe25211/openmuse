@@ -5,6 +5,7 @@ import {
   type DelegatedPane,
   delegatedTaskStatus,
   paneAfterHorizontalGesture,
+  taskForConversation,
 } from "../src/delegated-chat.ts";
 
 test("horizontal gestures switch panes without consuming vertical or short movement", () => {
@@ -26,6 +27,13 @@ test("delegated status stays explicit for uncertain and waiting outcomes", () =>
   assert.equal(status("running", delayedDelegation), "Taking longer than usual");
 });
 
+test("delegated task lookup uses the effective local conversation id", () => {
+  const local = delegatedTask("local-task", "local", "2026-09-28T01:00:00Z");
+  const localMain = delegatedTask("main-task", "local-main", "2026-09-28T00:00:00Z");
+  assert.equal(taskForConversation([local, localMain], "local-main"), localMain);
+  assert.equal(taskForConversation([local, localMain], "local"), local);
+});
+
 const context: NonNullable<AgentTask["delegation"]> = {
   conversationId: "conversation",
   requestId: "request",
@@ -36,3 +44,22 @@ const context: NonNullable<AgentTask["delegation"]> = {
   channelAttempted: true,
   submissionAttempted: true,
 };
+
+function delegatedTask(id: string, conversationId: string, createdAt: string): AgentTask {
+  return {
+    id,
+    title: "Task",
+    prompt: "Task prompt",
+    kind: "openbot",
+    delegation: { ...context, conversationId },
+    status: "running",
+    plan: [],
+    evidence: [],
+    input: {},
+    state: {},
+    createdAt,
+    updatedAt: createdAt,
+    attempts: 1,
+    artifactIds: [],
+  };
+}

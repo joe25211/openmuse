@@ -32,6 +32,7 @@ import {
   type DelegatedPane,
   delegatedTaskStatus,
   paneAfterHorizontalGesture,
+  taskForConversation,
 } from "./delegated-chat";
 import { MailToolCard } from "./mail-tool-card";
 import { FileThreadCard, TaskThreadCard } from "./thread-artifacts";
@@ -206,6 +207,7 @@ export function ChatScreen({
   const [picking, setPicking] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
   const list = useRef<ScrollView>(null);
+  const taskList = useRef<ScrollView>(null);
   const [queue] = useState(() => new ConversationQueue());
   const outbox = useSyncExternalStore(queue.subscribe, queue.getSnapshot, queue.getSnapshot);
   const followLatest = useRef(true);
@@ -218,17 +220,43 @@ export function ChatScreen({
   const [showSentContext, setShowSentContext] = useState(false);
   const stage = useRef<View>(null);
   const gestureStart = useRef<{ x: number; y: number; at: number } | null>(null);
-  const delegatedTask = [...(agentWorkspace?.tasks || [])]
-    .filter((task) => task.delegation?.conversationId === selection.id)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const delegatedTask = taskForConversation(agentWorkspace?.tasks || [], threadId);
+  const onPaneTouchStart = (event: {
+    nativeEvent: { touches: { pageX: number; pageY: number }[] };
+  }) => {
+    if (delegatedTask && event.nativeEvent.touches.length === 1) {
+      const touch = event.nativeEvent.touches[0];
+      gestureStart.current = { x: touch.pageX, y: touch.pageY, at: Date.now() };
+    }
+  };
+  const onPaneTouchEnd = (event: {
+    nativeEvent: { changedTouches: { pageX: number; pageY: number }[] };
+  }) => {
+    const start = gestureStart.current;
+    gestureStart.current = null;
+    if (
+      start &&
+      Date.now() - start.at < 500 &&
+      delegatedTask &&
+      event.nativeEvent.changedTouches.length
+    ) {
+      const touch = event.nativeEvent.changedTouches[0];
+      setDelegatedPane((current) =>
+        paneAfterHorizontalGesture(touch.pageX - start.x, touch.pageY - start.y, current),
+      );
+    }
+  };
   useEffect(() => {
     setDelegatedPane("chat");
     setShowSentContext(false);
   }, [delegatedTask?.id]);
   useEffect(() => {
     if (Platform.OS !== "web" || !delegatedTask) return;
-    const node = stage.current as unknown as HTMLElement | null;
-    if (!node) return;
+    const root = stage.current as unknown as HTMLElement | null;
+    const panes = [list.current, taskList.current]
+      .filter((pane): pane is ScrollView => !!pane)
+      .map((pane) => pane as unknown as HTMLElement);
+    if (!root || !panes.length) return;
     let dragStart: { x: number; y: number } | undefined;
     let wheelX = 0;
     let wheelTimer: ReturnType<typeof setTimeout> | undefined;
@@ -273,17 +301,21 @@ export function ChatScreen({
       event.preventDefault();
       const next: DelegatedPane = event.key === "ArrowLeft" ? "chat" : "task";
       setDelegatedPane(next);
-      node.querySelectorAll<HTMLElement>('[role="tab"]')[next === "chat" ? 0 : 1]?.focus();
+      root.querySelectorAll<HTMLElement>('[role="tab"]')[next === "chat" ? 0 : 1]?.focus();
     };
-    node.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("pointerup", onPointerUp);
-    node.addEventListener("wheel", onWheel, { passive: false });
-    node.addEventListener("keydown", onKeyDown);
+    root.addEventListener("keydown", onKeyDown);
+    for (const pane of panes) {
+      pane.addEventListener("pointerdown", onPointerDown);
+      pane.addEventListener("wheel", onWheel, { passive: false });
+    }
     return () => {
-      node.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("pointerup", onPointerUp);
-      node.removeEventListener("wheel", onWheel);
-      node.removeEventListener("keydown", onKeyDown);
+      root.removeEventListener("keydown", onKeyDown);
+      for (const pane of panes) {
+        pane.removeEventListener("pointerdown", onPointerDown);
+        pane.removeEventListener("wheel", onWheel);
+      }
       if (wheelTimer) clearTimeout(wheelTimer);
     };
   }, [delegatedTask]);
@@ -427,34 +459,7 @@ export function ChatScreen({
   const visible = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const replying = busy || agent.isRunning;
   return (
-    <View
-      ref={stage}
-      style={{ flex: 1 }}
-      onTouchStart={(event) => {
-        if (delegatedTask && event.nativeEvent.touches.length === 1) {
-          const touch = event.nativeEvent.touches[0];
-          gestureStart.current = { x: touch.pageX, y: touch.pageY, at: Date.now() };
-        }
-      }}
-      onTouchEnd={(event) => {
-        const start = gestureStart.current;
-        gestureStart.current = null;
-        if (
-          start &&
-          Date.now() - start.at < 500 &&
-          delegatedTask &&
-          event.nativeEvent.changedTouches.length
-        ) {
-          const touch = event.nativeEvent.changedTouches[0];
-          setDelegatedPane((current) =>
-            paneAfterHorizontalGesture(touch.pageX - start.x, touch.pageY - start.y, current),
-          );
-        }
-      }}
-      onTouchCancel={() => {
-        gestureStart.current = null;
-      }}
-    >
+    <View ref={stage} style={{ flex: 1 }}>
       {delegatedTask && (
         <View style={{ gap: 9, paddingTop: 8, paddingBottom: 10 }}>
           <View style={{ gap: 3 }}>
@@ -492,6 +497,11 @@ export function ChatScreen({
       )}
       <ScrollView
         ref={list}
+        onTouchStart={onPaneTouchStart}
+        onTouchEnd={onPaneTouchEnd}
+        onTouchCancel={() => {
+          gestureStart.current = null;
+        }}
         style={{ display: delegatedTask && delegatedPane === "task" ? "none" : "flex" }}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ gap: 13, paddingTop: 15, paddingBottom: 20, flexGrow: 1 }}
@@ -716,6 +726,12 @@ export function ChatScreen({
       </ScrollView>
       {delegatedTask && (
         <ScrollView
+          ref={taskList}
+          onTouchStart={onPaneTouchStart}
+          onTouchEnd={onPaneTouchEnd}
+          onTouchCancel={() => {
+            gestureStart.current = null;
+          }}
           style={{ display: delegatedPane === "task" ? "flex" : "none" }}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={{ gap: 13, paddingTop: 15, paddingBottom: 20 }}
@@ -1042,7 +1058,8 @@ function DelegatedTaskPane({ task }: { task: AgentTask }) {
       active = false;
     };
   }, [api, task.id, task.updatedAt]);
-  const savedTask = detail?.task ?? task;
+  const currentDetail = detail?.task.id === task.id ? detail : undefined;
+  const savedTask = currentDetail?.task ?? task;
   const result = savedTask.delegation?.output ?? savedTask.result;
   return (
     <View style={{ gap: 14 }}>
@@ -1082,8 +1099,8 @@ function DelegatedTaskPane({ task }: { task: AgentTask }) {
       </Card>
       <Card style={{ gap: 10 }}>
         <Text style={s.heading}>Activity</Text>
-        {detail?.events.length ? (
-          detail.events.map((event) => (
+        {currentDetail?.events.length ? (
+          currentDetail.events.map((event) => (
             <View
               key={event.id}
               style={{ borderLeftWidth: 2, borderLeftColor: colors.line, paddingLeft: 10, gap: 3 }}
