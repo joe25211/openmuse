@@ -1211,12 +1211,17 @@ export class AgentService {
       });
       if (delegation.fallbackExcerpt !== safeExcerpt || delegation.sentContext !== safeContext)
         await save({ fallbackExcerpt: safeExcerpt, sentContext: safeContext });
-      if ((delegation.readMode === "excerpt" || delegation.readMode === "supplied") && !safeExcerpt)
+      if (
+        (delegation.readMode === "excerpt" || delegation.readMode === "supplied") &&
+        !safeExcerpt
+      ) {
+        if (delegation.channelAttempted && !delegation.threadId) return pending(true);
         return {
           status: "failed",
           error: "No safe named-resource read or excerpt is available",
           delegation,
         };
+      }
     }
     if (!delegation.channelAttempted) {
       await gateway.eligibleBot(delegation.botId);

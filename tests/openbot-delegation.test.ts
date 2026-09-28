@@ -327,6 +327,28 @@ test("a saved pre-fix excerpt is sanitized before its first submission", async (
     await f.server.agent.worker.tick();
     assert.equal(run.mock.callCount(), 1);
     assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", unsafeOnly.id))?.status, "failed");
+    const uncertain = await f.request("conversation-1", {
+      requestId: "saved-unsafe-channel",
+      botId: "bot-1",
+      prompt: "Summarize garden notes",
+      suppliedText: "safe original text",
+    });
+    const channelAttempted = (await uncertain.json()) as AgentTask;
+    assert(channelAttempted.delegation);
+    await f.db.put(f.owner, "tasks", {
+      ...channelAttempted,
+      delegation: {
+        ...channelAttempted.delegation,
+        channelAttempted: true,
+        fallbackExcerpt: "garden Authorization: Basic VW5zYWZlQXV0aA==",
+        sentContext: "pre-fix context VW5zYWZlQXV0aA==",
+      },
+    });
+    await f.server.agent.worker.tick();
+    const stillUncertain = await f.db.get<AgentTask>(f.owner, "tasks", channelAttempted.id);
+    assert.notEqual(stillUncertain?.status, "failed");
+    assert.equal(stillUncertain?.delegation?.submissionAttempted, false);
+    assert.equal(run.mock.callCount(), 1);
   } finally {
     await f.close();
   }
