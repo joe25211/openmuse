@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { IntelligenceAgent } from "@copilotkit/core";
+import { Observable } from "rxjs";
 import {
   OpenBotAdapter,
   OpenBotError,
@@ -30,6 +32,47 @@ const navigation = {
   truncated: false,
   elapsedMs: 50,
 };
+
+test("delegation eligibility requires empty effective plugin and host grants", async () => {
+  let held = false;
+  const { adapter } = fixture((path) =>
+    Response.json(
+      path.startsWith("/api/plugins/for/")
+        ? { tools: held ? [{ ref: "host/shell" }] : [], skills: [] }
+        : { grants: [], pending: [], connected: false },
+    ),
+  );
+  assert.equal(await adapter.hasNoEffectiveGrants("bot-1"), true);
+  held = true;
+  assert.equal(await adapter.hasNoEffectiveGrants("bot-1"), false);
+});
+
+test("only a terminal matching the saved thread and run can settle a delegated attempt", async (t) => {
+  const { adapter, transport } = fixture(() => Response.json({}));
+  const events = [
+    { type: "RUN_FINISHED", threadId: "other-thread", runId: "run-1" },
+    { type: "RUN_FINISHED", threadId: "thread-1", runId: "other-run" },
+  ];
+  t.mock.method(
+    IntelligenceAgent.prototype,
+    "run",
+    () =>
+      new Observable((subscriber) => {
+        for (const event of events) subscriber.next(event);
+        subscriber.complete();
+      }),
+  );
+  transport.socketUrl = "ws://openbot.example/socket";
+  assert.equal(
+    await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {}),
+    "unconfirmed",
+  );
+  events.push({ type: "RUN_FINISHED", threadId: "thread-1", runId: "run-1" });
+  assert.equal(
+    await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {}),
+    "finished",
+  );
+});
 
 test("OpenBot is disabled by default and cannot call a supplied transport", async () => {
   const { transport, calls } = fixture(() => Response.json({}));

@@ -122,20 +122,26 @@ export class TaskWorker {
       leaseId: previous.leaseId ?? null,
     };
     if (previous.status === "running") expected.leaseUntil = previous.leaseUntil;
-    let task = await this.db.compareAndSwap<AgentTask>(owner, "tasks", previous.id, expected, {
+    const claimed = await this.db.compareAndSwap<AgentTask>(owner, "tasks", previous.id, expected, {
       status: "running",
       leaseId,
       leaseUntil: new Date(this.now() + leaseMs).toISOString(),
       updatedAt: new Date(this.now()).toISOString(),
       attempts: previous.attempts + 1,
     });
-    if (!task) return;
+    if (!claimed) return;
+    let task: AgentTask = claimed;
     const controller = new AbortController();
     this.active.set(task.id, controller);
     const taskId = task.id;
     const guard = async () => {
       const latest = await this.db.get<AgentTask>(owner, "tasks", taskId);
-      if (controller.signal.aborted || latest?.leaseId !== leaseId || latest.status !== "running")
+      if (
+        controller.signal.aborted ||
+        latest?.leaseId !== leaseId ||
+        latest.status !== "running" ||
+        (task.delegation && latest.delegation?.runId !== task.delegation.runId)
+      )
         throw new LostLeaseError();
     };
     const checkpoint = async (patch: Partial<AgentTask>) => {
@@ -144,7 +150,11 @@ export class TaskWorker {
         owner,
         "tasks",
         taskId,
-        { leaseId, status: "running" },
+        {
+          leaseId,
+          status: "running",
+          ...(task.delegation ? { delegation: { runId: task.delegation.runId } } : {}),
+        },
         { ...patch, updatedAt: new Date(this.now()).toISOString() },
       );
       if (!next) throw new LostLeaseError();
@@ -215,14 +225,17 @@ export class TaskWorker {
         await event("error", "Task needs attention", detail).catch((error) =>
           backgroundFailure("record task error", error),
         );
+        const latest = await this.db.get<AgentTask>(owner, "tasks", taskId);
         await this.db.compareAndSwap(
           owner,
           "tasks",
           taskId,
           { leaseId, status: "running" },
           {
-            status: "failed",
-            error: detail,
+            status: latest?.delegation?.channelAttempted ? "outcome_unknown" : "failed",
+            error: latest?.delegation?.channelAttempted
+              ? "The original OpenBot attempt needs reconciliation. It was not resent."
+              : detail,
             leaseId: null,
             leaseUntil: null,
             updatedAt: new Date(this.now()).toISOString(),

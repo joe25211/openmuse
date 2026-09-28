@@ -57,6 +57,7 @@ export async function createApp(
     browser,
     computer,
     composio,
+    openbot,
   );
   const intelligence = new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
   const runtime = makeRuntime(config, agent, auth, intelligence);
@@ -186,6 +187,9 @@ export async function createApp(
     return c.json(snapshot);
   });
   app.get("/api/openbot/agents", async (c) => c.json(await openbot.agents()));
+  app.get("/api/openbot/agents/:id/eligibility", async (c) =>
+    c.json({ bot: await openbot.eligibleBot(c.req.param("id")), eligible: true }),
+  );
   app.get("/api/openbot/channels", async (c) =>
     c.json(await openbot.channels(z.string().max(2048).optional().parse(c.req.query("cursor")))),
   );
@@ -206,6 +210,23 @@ export async function createApp(
   app.all("/api/openbot/copilotkit/*", (c) =>
     openbot.runtime(c.req.raw, c.req.path.slice("/api/openbot/copilotkit/".length)),
   );
+  app.post("/api/conversations/:id/delegations", async (c) => {
+    const body = z
+      .object({
+        requestId: z.string().trim().min(1).max(500),
+        botId: z.string().trim().min(1).max(128),
+        prompt: z.string().trim().min(1).max(12000),
+        brief: z.string().trim().max(500).optional(),
+      })
+      .parse(await c.req.json());
+    return c.json(
+      await agent.createDelegatedTask(c.get("owner"), {
+        ...body,
+        conversationId: c.req.param("id"),
+      }),
+      201,
+    );
+  });
   app.get("/api/composio/toolkits", async (c) => {
     const search = z
       .string()
