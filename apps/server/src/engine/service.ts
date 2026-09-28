@@ -248,8 +248,9 @@ export class AgentService {
     const main = await this.db.get<{ threadId: string }>(owner, "conversation-settings", "main");
     if (main?.threadId !== input.conversationId) {
       const local =
-        (input.conversationId === "local" || input.conversationId === "local-main") &&
-        (await this.db.get(owner, "conversations", "default"));
+        input.conversationId === "local-main" ||
+        (input.conversationId === "local" &&
+          (await this.db.get(owner, "conversations", "default")));
       if (!local) {
         if (!this.intelligence) throw new AppError("Conversation not found", 404);
         try {

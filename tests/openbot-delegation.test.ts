@@ -177,9 +177,15 @@ test("side and local conversations require an owner-scoped conversation", async 
     assert.equal((await f.request("side-1", input)).status, 201);
     assert.equal((await f.request("foreign-side", input)).status, 404);
     assert.equal(listed.mock.callCount(), 4);
-    assert.equal((await f.request("local-main", input)).status, 404);
+    assert.equal(await f.db.get(f.owner, "conversations", "default"), null);
+    const firstTurn = await f.request("local-main", input);
+    assert.equal(firstTurn.status, 201);
+    assert.equal(((await firstTurn.json()) as AgentTask).delegation?.conversationId, "local-main");
+    assert.equal(await f.db.get(f.owner, "conversations", "default"), null);
+    assert.equal(listed.mock.callCount(), 4);
+    assert.equal((await f.request("local", input)).status, 404);
     await f.db.put(f.owner, "conversations", { id: "default", messages: [] });
-    assert.equal((await f.request("local-main", input)).status, 201);
+    assert.equal((await f.request("local", input)).status, 201);
   } finally {
     await f.close();
   }
