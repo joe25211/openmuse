@@ -104,7 +104,6 @@ export interface OpenBotRunObservation {
   cursor?: string;
   messageId?: string;
   terminal?: "finished" | "error";
-  code?: string;
 }
 
 export type OpenBotComputerStatus = z.infer<typeof computerStatusSchema>;
@@ -426,11 +425,6 @@ export class OpenBotAdapter {
                   ? {
                       terminal:
                         event.type === "RUN_FINISHED" ? ("finished" as const) : ("error" as const),
-                      ...(event.type === "RUN_ERROR" &&
-                      "code" in event &&
-                      typeof event.code === "string"
-                        ? { code: event.code }
-                        : {}),
                     }
                   : {}),
               }),

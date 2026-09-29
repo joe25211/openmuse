@@ -523,11 +523,6 @@ export class AgentService {
   }
   async control(owner: string, id: string, action: "pause" | "resume" | "cancel" | "retry") {
     const task = await this.getTask(owner, id);
-    if (task.delegation) {
-      if (action !== "cancel")
-        throw new AppError("Only stopping is available for delegated tasks", 409);
-      return this.stopDelegation(owner, task);
-    }
     const linked = task.actionId
       ? await this.db.get<ActionProposal>(owner, "actions", task.actionId)
       : null;
@@ -545,6 +540,20 @@ export class AgentService {
       throw new AppError("This reviewed action already completed. Check its result first.", 409);
     if (action === "cancel" && task.status === "succeeded")
       throw new AppError("This task is already complete", 409);
+    // Claim denial on the Action row before cancelling; approval must lose that same claim.
+    if (action === "cancel" && linked?.status === "awaiting_review") {
+      const denied = await this.actions.decide(owner, linked.id, linked.hash, "deny");
+      if (denied.status !== "denied" && denied.status !== "expired")
+        throw new AppError(
+          "The reviewed action started; check its outcome before cancelling.",
+          409,
+        );
+    }
+    if (task.delegation) {
+      if (action !== "cancel")
+        throw new AppError("Only stopping is available for delegated tasks", 409);
+      return this.stopDelegation(owner, task);
+    }
     if (action === "retry" && task.status !== "failed")
       throw new AppError("Only failed tasks can be retried", 409);
     if (action === "resume" && task.status !== "paused")
@@ -563,15 +572,6 @@ export class AgentService {
       if (a && a.status !== "succeeded")
         throw new AppError(
           "Check the reviewed action before retrying; its outcome may be uncertain. Start a new task when reconciled.",
-          409,
-        );
-    }
-    // Claim denial on the Action row before cancelling; approval must lose that same claim.
-    if (action === "cancel" && linked?.status === "awaiting_review") {
-      const denied = await this.actions.decide(owner, linked.id, linked.hash, "deny");
-      if (denied.status !== "denied" && denied.status !== "expired")
-        throw new AppError(
-          "The reviewed action started; check its outcome before cancelling.",
           409,
         );
     }
@@ -661,8 +661,9 @@ export class AgentService {
       this.worker.abort(task.id);
       return cancelled;
     }
-    if (!delegation.threadId || !this.openbot)
-      throw new AppError("Saved Bot run identity is incomplete; reconciliation is required", 409);
+    const canStop = Boolean(
+      delegation.botId && delegation.threadId && delegation.runId && this.openbot,
+    );
     const requested = await this.db.compareAndSwap<AgentTask>(
       owner,
       "tasks",
@@ -670,7 +671,11 @@ export class AgentService {
       { status: task.status, delegation },
       {
         status: "outcome_unknown",
-        delegation: { ...delegation, stop: "pending", stopAttemptedAt: date() },
+        delegation: {
+          ...delegation,
+          stop: "pending",
+          ...(canStop ? { stopAttemptedAt: date() } : {}),
+        },
         leaseId: null,
         leaseUntil: null,
         nextRunAt: new Date(Date.now() + 5000).toISOString(),
@@ -681,15 +686,16 @@ export class AgentService {
     if (!requested) throw new AppError("Task changed; refresh and try again", 409);
     this.worker.abort(task.id);
     let accepted = false;
-    try {
-      accepted = await this.openbot.stopRun(
-        delegation.botId,
-        delegation.threadId,
-        delegation.runId,
-      );
-    } catch {
-      /* A lost response cannot prove whether the remote stop happened. */
-    }
+    if (canStop && delegation.threadId && this.openbot)
+      try {
+        accepted = await this.openbot.stopRun(
+          delegation.botId,
+          delegation.threadId,
+          delegation.runId,
+        );
+      } catch {
+        /* A lost response cannot prove whether the remote stop happened. */
+      }
     for (let attempt = 0; attempt < 8; attempt++) {
       const latest = await this.getTask(owner, task.id);
       if (latest.delegation?.runId !== delegation.runId || latest.delegation.stop !== "pending")
@@ -1305,9 +1311,6 @@ export class AgentService {
           ? { messageIds: [...new Set([...(delegation.messageIds ?? []), event.messageId])] }
           : {}),
         ...(event.terminal ? { terminal: event.terminal } : {}),
-        ...(event.code === "STOPPED" && delegation.stop
-          ? { stop: "confirmed", stoppedAt: now() }
-          : {}),
       });
     };
     if (!delegation.submissionAttempted) {

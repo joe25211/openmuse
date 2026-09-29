@@ -324,6 +324,130 @@ test("stop during submission fences the older worker and sends one scoped stop",
   }
 });
 
+test("replayed STOPPED without an accepted scoped stop records original error, not cancellation", async (t) => {
+  const f = await fixture();
+  try {
+    const response = await f.request("conversation-1", {
+      requestId: "replayed-stopped",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", {
+      ...task,
+      status: "running",
+      delegation: {
+        ...task.delegation,
+        channelAttempted: true,
+        threadId: "thread-1",
+        submissionAttempted: true,
+      },
+    });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    t.mock.method(gateway, "stopRun", async () => false);
+    const uncertain = await f.server.agent.control(f.owner, task.id, "cancel");
+    t.mock.method(
+      gateway,
+      "reconnectRun",
+      async (
+        _bot: string,
+        _thread: string,
+        _run: string,
+        _cursor: string | undefined,
+        onEvent: (event: { type: string; terminal: "error"; code: string }) => Promise<void>,
+      ) => {
+        await onEvent({ type: "RUN_ERROR", terminal: "error", code: "STOPPED" });
+        return { terminal: "error" as const, messageIds: [] };
+      },
+    );
+    await f.db.put(f.owner, "tasks", { ...uncertain, nextRunAt: new Date(0).toISOString() });
+    await f.server.agent.worker.tick();
+    const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(saved?.status, "failed");
+    assert.equal(saved.delegation?.stop, "unconfirmed");
+  } finally {
+    await f.close();
+  }
+});
+
+test("incomplete saved run tuple persists Stop unconfirmed without a remote call", async (t) => {
+  const f = await fixture();
+  try {
+    const response = await f.request("conversation-1", {
+      requestId: "missing-thread",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", {
+      ...task,
+      status: "running",
+      delegation: {
+        ...task.delegation,
+        channelAttempted: true,
+        submissionAttempted: true,
+      },
+    });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    const stop = t.mock.method(gateway, "stopRun", async () => true);
+    const uncertain = await f.server.agent.control(f.owner, task.id, "cancel");
+    assert.equal(uncertain.status, "outcome_unknown");
+    assert.equal(uncertain.delegation?.stop, "unconfirmed");
+    assert.equal(uncertain.delegation?.runId, task.delegation?.runId);
+    assert.equal(uncertain.delegation?.stopAttemptedAt, undefined);
+    assert.equal(stop.mock.callCount(), 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("delegated stop preserves reviewed Action safeguards", async (t) => {
+  const f = await fixture();
+  try {
+    const response = await f.request("conversation-1", {
+      requestId: "reviewed-stop",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    const proposal = await f.server.actions.propose(f.owner, {
+      kind: "email.send",
+      data: {
+        to: ["sam@example.com"],
+        subject: "Visit",
+        body: "Hello",
+        cc: [],
+        bcc: [],
+        attachmentIds: [],
+      },
+    });
+    await f.db.put(f.owner, "tasks", { ...task, actionId: proposal.id });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    const stop = t.mock.method(gateway, "stopRun", async () => true);
+    for (const [status, message] of [
+      ["executing", /may still change/],
+      ["outcome_unknown", /outcome is unknown/],
+      ["succeeded", /already completed/],
+    ] as const) {
+      await f.db.put(f.owner, "actions", { ...proposal, status });
+      await assert.rejects(f.server.agent.control(f.owner, task.id, "cancel"), message);
+    }
+    assert.equal(stop.mock.callCount(), 0);
+    await f.db.put(f.owner, "actions", proposal);
+    const cancelled = await f.server.agent.control(f.owner, task.id, "cancel");
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(
+      (await f.db.get<{ status: string }>(f.owner, "actions", proposal.id))?.status,
+      "denied",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
 test("named resource fallback sends only relevant authorized lines and user supplied text", async () => {
   const f = await fixture();
   try {
