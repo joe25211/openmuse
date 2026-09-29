@@ -523,8 +523,11 @@ export class AgentService {
   }
   async control(owner: string, id: string, action: "pause" | "resume" | "cancel" | "retry") {
     const task = await this.getTask(owner, id);
-    if (task.delegation)
-      throw new AppError("Delegated task controls require verified run handling", 409);
+    if (task.delegation) {
+      if (action !== "cancel")
+        throw new AppError("Only stopping is available for delegated tasks", 409);
+      return this.stopDelegation(owner, task);
+    }
     const linked = task.actionId
       ? await this.db.get<ActionProposal>(owner, "actions", task.actionId)
       : null;
@@ -621,6 +624,103 @@ export class AgentService {
     });
     return updated;
   }
+  private async stopDelegation(owner: string, task: AgentTask): Promise<AgentTask> {
+    const delegation = task.delegation;
+    if (!delegation) throw new AppError("Delegation is missing", 409);
+    if (delegation.stop === "confirmed" || task.status === "cancelled") return task;
+    if (terminal.has(task.status) || delegation.terminal)
+      throw new AppError("The original Bot run already ended; check its result", 409);
+    if (delegation.stop === "pending")
+      throw new AppError("A stop request is already being checked", 409);
+    if (delegation.stop === "unconfirmed")
+      throw new AppError(
+        "Stop unconfirmed. Check the original run before requesting another stop; current active-run proof is unavailable.",
+        409,
+      );
+    if (!delegation.submissionAttempted) {
+      const cancelled = await this.db.compareAndSwap<AgentTask>(
+        owner,
+        "tasks",
+        task.id,
+        { status: task.status, delegation },
+        {
+          status: "cancelled",
+          delegation: {
+            ...delegation,
+            stop: "confirmed",
+            stoppedAt: date(),
+            stopReconciledAt: date(),
+          },
+          leaseId: null,
+          leaseUntil: null,
+          updatedAt: date(),
+          result: "Cancelled before Bot submission.",
+        },
+      );
+      if (!cancelled) throw new AppError("Task changed; refresh and try again", 409);
+      this.worker.abort(task.id);
+      return cancelled;
+    }
+    if (!delegation.threadId || !this.openbot)
+      throw new AppError("Saved Bot run identity is incomplete; reconciliation is required", 409);
+    const requested = await this.db.compareAndSwap<AgentTask>(
+      owner,
+      "tasks",
+      task.id,
+      { status: task.status, delegation },
+      {
+        status: "outcome_unknown",
+        delegation: { ...delegation, stop: "pending", stopAttemptedAt: date() },
+        leaseId: null,
+        leaseUntil: null,
+        nextRunAt: new Date(Date.now() + 5000).toISOString(),
+        updatedAt: date(),
+        error: "Stop unconfirmed. OpenMuse is checking the original Bot run.",
+      },
+    );
+    if (!requested) throw new AppError("Task changed; refresh and try again", 409);
+    this.worker.abort(task.id);
+    let accepted = false;
+    try {
+      accepted = await this.openbot.stopRun(
+        delegation.botId,
+        delegation.threadId,
+        delegation.runId,
+      );
+    } catch {
+      /* A lost response cannot prove whether the remote stop happened. */
+    }
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const latest = await this.getTask(owner, task.id);
+      if (latest.delegation?.runId !== delegation.runId || latest.delegation.stop !== "pending")
+        return latest;
+      const updated = await this.db.compareAndSwap<AgentTask>(
+        owner,
+        "tasks",
+        task.id,
+        { status: latest.status, delegation: latest.delegation },
+        {
+          status: accepted ? "cancelled" : "outcome_unknown",
+          delegation: {
+            ...latest.delegation,
+            stop: accepted ? "confirmed" : "unconfirmed",
+            ...(accepted ? { stoppedAt: date() } : {}),
+          },
+          updatedAt: date(),
+          error: accepted ? null : "Stop unconfirmed. OpenMuse is checking the original Bot run.",
+          result: accepted
+            ? "Bot stop confirmed. Started external changes may remain."
+            : latest.result,
+        },
+      );
+      if (updated) return updated;
+    }
+    throw new AppError(
+      "Stop response could not be saved; refresh the task and reconcile the original run",
+      409,
+    );
+  }
+
   async answer(
     owner: string,
     id: string,
@@ -1174,6 +1274,8 @@ export class AgentService {
     };
     const pending = async (lost: boolean): Promise<Partial<AgentTask>> => {
       if (lost && !delegation.transportLostAt) await save({ transportLostAt: now() });
+      if (delegation.stop === "confirmed") return { status: "cancelled", delegation };
+      if (delegation.stop) return { status: "outcome_unknown", delegation };
       if (
         delegation.transportLostAt &&
         context.now() - Date.parse(delegation.transportLostAt) >= 5 * 60_000
@@ -1203,6 +1305,9 @@ export class AgentService {
           ? { messageIds: [...new Set([...(delegation.messageIds ?? []), event.messageId])] }
           : {}),
         ...(event.terminal ? { terminal: event.terminal } : {}),
+        ...(event.code === "STOPPED" && delegation.stop
+          ? { stop: "confirmed", stoppedAt: now() }
+          : {}),
       });
     };
     if (!delegation.submissionAttempted) {
@@ -1344,6 +1449,17 @@ export class AgentService {
       }
     }
     if (!delegation.terminal) return pending(false);
+    if (delegation.stop === "confirmed") {
+      const lateOutput = await gateway
+        .textResult(delegation.botId, delegation.threadId, delegation.messageIds ?? [])
+        .catch(() => "");
+      if (lateOutput || !delegation.messageIds?.length)
+        await save({
+          stopReconciledAt: now(),
+          ...(lateOutput ? { lateOutput, lateOutputAt: now() } : {}),
+        });
+      return { status: "cancelled", delegation };
+    }
     if (delegation.terminal === "error")
       return { status: "failed", error: "The linked OpenBot run reported an error", delegation };
     try {
@@ -1425,6 +1541,14 @@ export class AgentService {
         "The original Bot run could not be verified yet. OpenMuse is still checking it.",
         task.id,
         `task-unknown:${task.id}`,
+      );
+    } else if (task.status === "cancelled" && task.delegation?.lateOutput) {
+      await this.notify(
+        owner,
+        "Bot output arrived after stop",
+        "Late output is saved on the original task. Review any external changes separately.",
+        task.id,
+        `task-late:${task.id}`,
       );
     } else if (task.status === "waiting_input") {
       await this.notify(

@@ -34,6 +34,7 @@ import type {
   RunEvent,
 } from "../../../packages/domain/src/agent";
 import { useAgentWorkspace } from "./agent-workspace";
+import { delegatedTaskStatus } from "./delegated-chat";
 import { ActivityScreen, ConnectionsScreen } from "./screens";
 import {
   Button,
@@ -133,7 +134,7 @@ export function TaskCard({
             <Text style={s.heading}>{task.title}</Text>
             {task.delegation && <Text style={s.small}>Bot: {task.delegation.botName}</Text>}
             <Text style={s.small}>
-              {statusLabel(task.status)}
+              {task.delegation ? delegatedTaskStatus(task) : statusLabel(task.status)}
               {task.plan.length ? ` · ${done}/${task.plan.length} steps` : ""}
             </Text>
           </View>
@@ -377,7 +378,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       title={task?.title || "Task"}
       subtitle={
         task
-          ? `${uncertainAction ? "Outcome unknown" : statusLabel(task.status)} · ${stamp(task.updatedAt)}`
+          ? `${uncertainAction ? "Outcome unknown" : task.delegation ? delegatedTaskStatus(task) : statusLabel(task.status)} · ${stamp(task.updatedAt)}`
           : "Loading saved progress…"
       }
       onClose={close}
@@ -439,7 +440,40 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 Cancel task
               </Button>
             )}
+            {task.delegation && activeTask(task) && !task.delegation.stop && (
+              <Button
+                small
+                danger
+                icon={X}
+                busy={busy}
+                onPress={() => void act("control", { action: "cancel" })}
+              >
+                {task.delegation.submissionAttempted ? "Stop Bot run" : "Cancel before submission"}
+              </Button>
+            )}
           </View>
+          {task.delegation?.stop === "unconfirmed" || task.delegation?.stop === "pending" ? (
+            <Text style={s.muted}>
+              {task.status === "succeeded" || task.status === "failed"
+                ? "Stop was not confirmed; the original Bot run later ended."
+                : "Stop unconfirmed. The original Bot run is being reconciled. Check this task before requesting another stop."}
+            </Text>
+          ) : null}
+          {task.delegation?.stop === "confirmed" && (
+            <Text style={s.muted}>
+              {task.delegation.submissionAttempted
+                ? "Bot stop confirmed. Any external changes already started may remain."
+                : "Cancelled before Bot submission."}
+            </Text>
+          )}
+          {!!task.delegation?.lateOutput && (
+            <Card style={{ gap: 8 }}>
+              <Text style={s.heading}>Late Bot output · {stamp(task.delegation.lateOutputAt)}</Text>
+              <Text selectable style={s.text}>
+                {task.delegation.lateOutput}
+              </Text>
+            </Card>
+          )}
           {uncertainAction && (
             <Card style={{ backgroundColor: colors.orange, gap: 10 }}>
               <Text style={s.heading}>Action outcome unknown</Text>

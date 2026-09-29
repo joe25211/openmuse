@@ -104,6 +104,7 @@ export interface OpenBotRunObservation {
   cursor?: string;
   messageId?: string;
   terminal?: "finished" | "error";
+  code?: string;
 }
 
 export type OpenBotComputerStatus = z.infer<typeof computerStatusSchema>;
@@ -254,6 +255,44 @@ export class OpenBotAdapter {
     );
   }
 
+  async stopRun(botId: string, threadId: string, runId: string): Promise<boolean> {
+    const transport = this.requireTransport();
+    const response = await transport.request(
+      `/api/copilotkit/agent/${encodeURIComponent(identifier(botId))}/stop/${encodeURIComponent(identifier(threadId))}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId: identifier(runId) }),
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (!response.ok) return false;
+    const body = z
+      .object({
+        stopped: z.literal(true),
+        interrupt: z.object({
+          type: z.literal("RUN_ERROR"),
+          code: z.literal("STOPPED"),
+          botId: z.string().optional(),
+          threadId: z.string().optional(),
+          runId: z.string().optional(),
+        }),
+        botId: z.string().optional(),
+        threadId: z.string().optional(),
+        runId: z.string().optional(),
+      })
+      .safeParse(await response.json().catch(() => null));
+    return (
+      body.success &&
+      (body.data.botId === undefined || body.data.botId === botId) &&
+      (body.data.threadId === undefined || body.data.threadId === threadId) &&
+      (body.data.runId === undefined || body.data.runId === runId) &&
+      (body.data.interrupt.botId === undefined || body.data.interrupt.botId === botId) &&
+      (body.data.interrupt.threadId === undefined || body.data.interrupt.threadId === threadId) &&
+      (body.data.interrupt.runId === undefined || body.data.interrupt.runId === runId)
+    );
+  }
+
   private async observeText(
     mode: "run" | "connect",
     botId: string,
@@ -270,6 +309,7 @@ export class OpenBotAdapter {
     messageIds: string[];
     lost?: boolean;
   }> {
+    signal?.throwIfAborted();
     const transport = this.requireTransport();
     if (!transport.socketUrl)
       throw new OpenBotError("not_configured", "OpenBot realtime is unavailable.");
@@ -386,6 +426,11 @@ export class OpenBotAdapter {
                   ? {
                       terminal:
                         event.type === "RUN_FINISHED" ? ("finished" as const) : ("error" as const),
+                      ...(event.type === "RUN_ERROR" &&
+                      "code" in event &&
+                      typeof event.code === "string"
+                        ? { code: event.code }
+                        : {}),
                     }
                   : {}),
               }),

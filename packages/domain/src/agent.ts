@@ -36,6 +36,12 @@ export interface TaskDelegation {
   terminal?: "finished" | "error";
   messageIds?: string[];
   output?: string;
+  stop?: "pending" | "unconfirmed" | "confirmed";
+  stopAttemptedAt?: string;
+  stoppedAt?: string;
+  stopReconciledAt?: string;
+  lateOutput?: string;
+  lateOutputAt?: string;
 }
 export interface Evidence {
   id: string;

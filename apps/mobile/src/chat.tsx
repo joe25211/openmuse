@@ -1042,6 +1042,7 @@ function DelegatedTaskPane({ task }: { task: AgentTask }) {
   const { api, open } = useWorkspace();
   const [detail, setDetail] = useState<{ task: AgentTask; events: RunEvent[] }>();
   const [error, setError] = useState("");
+  const [stopping, setStopping] = useState(false);
   useEffect(() => {
     let active = true;
     void api
@@ -1076,11 +1077,49 @@ function DelegatedTaskPane({ task }: { task: AgentTask }) {
         {savedTask.status === "failed" && savedTask.error && (
           <ErrorNotice error={savedTask.error} />
         )}
-        {savedTask.status === "outcome_unknown" && (
+        {savedTask.status === "outcome_unknown" && !savedTask.delegation?.stop && (
           <Text style={s.muted}>
             OpenMuse has not verified whether the Bot finished. This task is still being reconciled.
           </Text>
         )}
+        {!!savedTask.delegation?.stop && savedTask.delegation.stop !== "confirmed" && (
+          <Text style={s.muted}>
+            {savedTask.status === "succeeded" || savedTask.status === "failed"
+              ? "Stop was not confirmed; the original Bot run later ended."
+              : "Stop unconfirmed. The original run is being reconciled; check task details before another request."}
+          </Text>
+        )}
+        {savedTask.delegation?.stop === "confirmed" && (
+          <Text style={s.muted}>
+            {savedTask.delegation.submissionAttempted
+              ? "Bot stop confirmed. Started external changes may remain."
+              : "Cancelled before Bot submission."}
+          </Text>
+        )}
+        {!savedTask.delegation?.stop &&
+          !["succeeded", "failed", "cancelled"].includes(savedTask.status) && (
+            <Button
+              small
+              busy={stopping}
+              onPress={() => {
+                setStopping(true);
+                void api
+                  .request(`/api/agent/tasks/${savedTask.id}/control`, { action: "cancel" }, "POST")
+                  .then(() =>
+                    api.request<{ task: AgentTask; events: RunEvent[] }>(
+                      `/api/agent/tasks/${savedTask.id}`,
+                    ),
+                  )
+                  .then(setDetail)
+                  .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+                  .finally(() => setStopping(false));
+              }}
+            >
+              {savedTask.delegation?.submissionAttempted
+                ? "Stop Bot run"
+                : "Cancel before submission"}
+            </Button>
+          )}
         <Button small onPress={() => open({ type: "task", taskId: savedTask.id })}>
           {savedTask.status === "waiting_input"
             ? "Answer task question"
@@ -1124,6 +1163,15 @@ function DelegatedTaskPane({ task }: { task: AgentTask }) {
         <Card style={{ backgroundColor: colors.green, gap: 8 }}>
           <Text style={s.heading}>Saved result</Text>
           <AssistantResponse content={result} />
+        </Card>
+      )}
+      {!!savedTask.delegation?.lateOutput && (
+        <Card style={{ gap: 8 }}>
+          <Text style={s.heading}>
+            Late Bot output ·{" "}
+            {new Date(savedTask.delegation.lateOutputAt ?? savedTask.updatedAt).toLocaleString()}
+          </Text>
+          <AssistantResponse content={savedTask.delegation.lateOutput} />
         </Card>
       )}
       {!!savedTask.error && savedTask.status !== "failed" && (

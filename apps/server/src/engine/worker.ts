@@ -82,6 +82,11 @@ export class TaskWorker {
             ((t.status === "running" || (t.kind === "openbot" && t.status === "outcome_unknown")) &&
               (!t.nextRunAt || Date.parse(t.nextRunAt) <= this.now()) &&
               (!t.leaseId || Date.parse(t.leaseUntil ?? "") <= this.now())) ||
+            (t.status === "cancelled" &&
+              t.delegation?.stop === "confirmed" &&
+              !t.delegation.stopReconciledAt &&
+              (!t.nextRunAt || Date.parse(t.nextRunAt) <= this.now()) &&
+              (!t.leaseId || Date.parse(t.leaseUntil ?? "") <= this.now())) ||
             t.status === "waiting_approval"),
       );
       const eligible = [];
@@ -120,7 +125,10 @@ export class TaskWorker {
     if (this.stopping) return;
     const leaseId = randomUUID(),
       leaseMs = this.options.leaseMs ?? 60000;
-    const leaseStatus = previous.status === "outcome_unknown" ? "outcome_unknown" : "running";
+    const leaseStatus =
+      previous.status === "outcome_unknown" || previous.status === "cancelled"
+        ? previous.status
+        : "running";
     const expected: Record<string, unknown> = {
       status: previous.status,
       leaseId: previous.leaseId ?? null,
@@ -144,7 +152,7 @@ export class TaskWorker {
         controller.signal.aborted ||
         latest?.leaseId !== leaseId ||
         latest.status !== leaseStatus ||
-        (task.delegation && latest.delegation?.runId !== task.delegation.runId)
+        (task.delegation && JSON.stringify(latest.delegation) !== JSON.stringify(task.delegation))
       )
         throw new LostLeaseError();
     };
@@ -157,7 +165,7 @@ export class TaskWorker {
         {
           leaseId,
           status: leaseStatus,
-          ...(task.delegation ? { delegation: { runId: task.delegation.runId } } : {}),
+          ...(task.delegation ? { delegation: task.delegation } : {}),
         },
         { ...patch, updatedAt: new Date(this.now()).toISOString() },
       );
@@ -212,7 +220,10 @@ export class TaskWorker {
         ...result,
         leaseId: null,
         leaseUntil: null,
-        ...(task.delegation && (result.status === "running" || result.status === "outcome_unknown")
+        ...(task.delegation &&
+        (result.status === "running" ||
+          result.status === "outcome_unknown" ||
+          (result.status === "cancelled" && !result.delegation?.stopReconciledAt))
           ? { nextRunAt: new Date(this.now() + 5000).toISOString() }
           : {}),
       });

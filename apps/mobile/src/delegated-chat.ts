@@ -22,10 +22,11 @@ export function paneAfterHorizontalGesture(
 }
 
 export function delegatedTaskStatus(task: Pick<AgentTask, "status" | "delegation">): string {
-  // #18 adds its persisted Stop unconfirmed marker through this display seam.
-  if (task.status === "outcome_unknown") return "Outcome unknown";
   if (task.status === "succeeded") return "Completed";
   if (task.status === "failed") return "Failed";
+  if (task.delegation?.stop === "pending" || task.delegation?.stop === "unconfirmed")
+    return "Stop unconfirmed";
+  if (task.status === "outcome_unknown") return "Outcome unknown";
   if (task.status === "waiting_input") return "Needs your input";
   if (task.status === "waiting_approval") return "Ready for review";
   if (

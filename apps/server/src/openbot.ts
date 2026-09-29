@@ -179,6 +179,10 @@ export class OpenBotGateway {
     return this.adapter.reconnectRun(botId, threadId, runId, cursor, onEvent, signal);
   }
 
+  stopRun(botId: string, threadId: string, runId: string) {
+    return this.adapter.stopRun(botId, threadId, runId);
+  }
+
   textResult(botId: string, threadId: string, messageIds: string[]) {
     return this.adapter.textResult(botId, threadId, messageIds);
   }

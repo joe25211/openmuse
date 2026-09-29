@@ -24,6 +24,8 @@ test("delegated status stays explicit for uncertain and waiting outcomes", () =>
   assert.equal(status("waiting_input"), "Needs your input");
   assert.equal(status("succeeded"), "Completed");
   assert.equal(status("failed"), "Failed");
+  assert.equal(status("outcome_unknown", { ...context, stop: "unconfirmed" }), "Stop unconfirmed");
+  assert.equal(status("succeeded", { ...context, stop: "unconfirmed" }), "Completed");
   const delayedDelegation = { ...context, delayedAt: "2026-09-28T00:00:00Z" };
   assert.equal(status("running", delayedDelegation), "Taking longer than usual");
 });
