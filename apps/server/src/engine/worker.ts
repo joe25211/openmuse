@@ -132,15 +132,23 @@ export class TaskWorker {
     const expected: Record<string, unknown> = {
       status: previous.status,
       leaseId: previous.leaseId ?? null,
+      ...(previous.delegation ? { delegation: previous.delegation } : {}),
     };
     if (previous.status === "running") expected.leaseUntil = previous.leaseUntil;
-    const claimed = await this.db.compareAndSwap<AgentTask>(owner, "tasks", previous.id, expected, {
-      status: leaseStatus,
-      leaseId,
-      leaseUntil: new Date(this.now() + leaseMs).toISOString(),
-      updatedAt: new Date(this.now()).toISOString(),
-      attempts: previous.attempts + 1,
-    });
+    const claimed = await this.db.compareAndSwap<AgentTask>(
+      owner,
+      "tasks",
+      previous.id,
+      expected,
+      {
+        status: leaseStatus,
+        leaseId,
+        leaseUntil: new Date(this.now() + leaseMs).toISOString(),
+        updatedAt: new Date(this.now()).toISOString(),
+        attempts: previous.attempts + 1,
+      },
+      Boolean(previous.delegation),
+    );
     if (!claimed) return;
     let task: AgentTask = claimed;
     const controller = new AbortController();

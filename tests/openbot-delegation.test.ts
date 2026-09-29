@@ -204,18 +204,29 @@ test("delegated stop keeps uncertainty and reconciles late output without changi
     assert.equal(confirmed.status, "cancelled");
     assert.equal(confirmed.delegation?.stop, "confirmed");
     assert.deepEqual(stop.mock.calls[0]?.arguments, ["bot-1", "thread-1", task.delegation?.runId]);
-    t.mock.method(gateway, "reconnectRun", async () => ({
+    const reconnect = t.mock.method(gateway, "reconnectRun", async () => ({
       terminal: "finished" as const,
       messageIds: ["late-1"],
     }));
     t.mock.method(gateway, "textResult", async () => "Late answer.");
     await f.db.put(f.owner, "tasks", { ...confirmed, nextRunAt: new Date(0).toISOString() });
+    const stale = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert(stale);
     await f.server.agent.worker.tick();
     const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
     assert.equal(saved?.status, "cancelled");
     assert.equal(saved.delegation?.lateOutput, "Late answer.");
     assert(saved.delegation?.lateOutputAt);
+    const scan = f.db.scan.bind(f.db);
+    t.mock.method(f.db, "scan", async <T>(kind: string) =>
+      kind === "tasks" ? [{ owner: f.owner, value: stale as T }] : scan<T>(kind),
+    );
     await f.server.agent.worker.tick();
+    assert.equal(reconnect.mock.callCount(), 1);
+    assert.equal(
+      (await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.delegation?.lateOutputAt,
+      saved.delegation.lateOutputAt,
+    );
     assert.equal(stop.mock.callCount(), 1);
     assert.equal(
       (await f.db.list<{ title: string }>(f.owner, "notifications")).filter(
