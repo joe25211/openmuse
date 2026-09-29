@@ -50,9 +50,11 @@ export class Store {
     id: string,
     expected: Record<string, unknown>,
     patch: Record<string, unknown>,
+    // JSONB containment allows extra nested keys; delegated control needs equality.
+    exactDelegation = false,
   ): Promise<T | null> {
     const result = await this.db.query(
-      "UPDATE records SET data=data || $5::jsonb,updated_at=now() WHERE owner=$1 AND kind=$2 AND id=$3 AND data @> $4::jsonb RETURNING data",
+      `UPDATE records SET data=data || $5::jsonb,updated_at=now() WHERE owner=$1 AND kind=$2 AND id=$3 AND data @> $4::jsonb${exactDelegation ? " AND data->'delegation' = $4::jsonb->'delegation'" : ""} RETURNING data`,
       [owner, kind, id, JSON.stringify(expected), JSON.stringify(patch)],
     );
     return (result.rows[0]?.data as T | undefined) ?? null;

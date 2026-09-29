@@ -30,6 +30,7 @@ import { ConversationQueue, type QueuedMessage } from "./conversation-queue";
 import { runConversationTurn } from "./conversation-run";
 import {
   type DelegatedPane,
+  delegatedTaskNotice,
   delegatedTaskStatus,
   freshestTask,
   paneAfterHorizontalGesture,
@@ -995,16 +996,7 @@ function DelegatedHandoff({
   const status = delegatedTaskStatus(task);
   const result = task.delegation?.output ?? task.result;
   const preview = result?.replace(/\s+/g, " ").slice(0, 240);
-  const notice =
-    task.status === "outcome_unknown"
-      ? `OpenMuse cannot confirm whether ${task.delegation?.botName} finished.`
-      : task.status === "failed"
-        ? `${task.delegation?.botName} reported a failure.`
-        : task.status === "waiting_input"
-          ? `${task.delegation?.botName} needs your input: ${task.question || "Open the task to continue."}`
-          : task.status === "succeeded"
-            ? `${task.delegation?.botName} finished. The saved result is in Task.`
-            : `${task.delegation?.botName} is working on this task.`;
+  const notice = delegatedTaskNotice(task);
   return (
     <Card style={{ gap: 9, marginTop: 5 }}>
       <View style={[s.row, { justifyContent: "space-between", gap: 8 }]}>

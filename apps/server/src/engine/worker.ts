@@ -168,6 +168,7 @@ export class TaskWorker {
           ...(task.delegation ? { delegation: task.delegation } : {}),
         },
         { ...patch, updatedAt: new Date(this.now()).toISOString() },
+        Boolean(task.delegation),
       );
       if (!next) throw new LostLeaseError();
       task = next;

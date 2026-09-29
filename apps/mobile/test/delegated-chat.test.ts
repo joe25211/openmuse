@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { AgentTask } from "../../../packages/domain/src/agent.ts";
 import {
   type DelegatedPane,
+  delegatedTaskNotice,
   delegatedTaskStatus,
   freshestTask,
   paneAfterHorizontalGesture,
@@ -28,6 +29,28 @@ test("delegated status stays explicit for uncertain and waiting outcomes", () =>
   assert.equal(status("succeeded", { ...context, stop: "unconfirmed" }), "Completed");
   const delayedDelegation = { ...context, delayedAt: "2026-09-28T00:00:00Z" };
   assert.equal(status("running", delayedDelegation), "Taking longer than usual");
+});
+
+test("handoff notices describe stop state and keep a later terminal outcome", () => {
+  const notice = (status: AgentTask["status"], delegation = context) =>
+    delegatedTaskNotice({ status, delegation });
+  assert.equal(
+    notice("cancelled", { ...context, stop: "confirmed" }),
+    "Bot stop confirmed. Started external changes may remain.",
+  );
+  assert.equal(
+    notice("cancelled", { ...context, submissionAttempted: false, stop: "confirmed" }),
+    "Cancelled before Bot submission.",
+  );
+  assert.equal(
+    notice("outcome_unknown", { ...context, stop: "unconfirmed" }),
+    "Stop unconfirmed. OpenMuse is checking the original Bot run.",
+  );
+  assert.equal(
+    notice("succeeded", { ...context, stop: "unconfirmed" }),
+    "Scout finished. The saved result is in Task.",
+  );
+  assert.equal(notice("failed", { ...context, stop: "unconfirmed" }), "Scout reported a failure.");
 });
 
 test("delegated task lookup uses the effective local conversation id", () => {

@@ -40,3 +40,21 @@ export function delegatedTaskStatus(task: Pick<AgentTask, "status" | "delegation
   if (task.status === "running") return "In progress";
   return task.status.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 }
+
+export function delegatedTaskNotice(
+  task: Pick<AgentTask, "status" | "delegation" | "question">,
+): string {
+  const bot = task.delegation?.botName;
+  if (task.status === "failed") return `${bot} reported a failure.`;
+  if (task.status === "succeeded") return `${bot} finished. The saved result is in Task.`;
+  if (task.delegation?.stop === "pending" || task.delegation?.stop === "unconfirmed")
+    return "Stop unconfirmed. OpenMuse is checking the original Bot run.";
+  if (task.status === "cancelled")
+    return task.delegation?.submissionAttempted
+      ? "Bot stop confirmed. Started external changes may remain."
+      : "Cancelled before Bot submission.";
+  if (task.status === "outcome_unknown") return `OpenMuse cannot confirm whether ${bot} finished.`;
+  if (task.status === "waiting_input")
+    return `${bot} needs your input: ${task.question || "Open the task to continue."}`;
+  return `${bot} is working on this task.`;
+}

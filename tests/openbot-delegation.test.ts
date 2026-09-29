@@ -324,6 +324,151 @@ test("stop during submission fences the older worker and sends one scoped stop",
   }
 });
 
+test("two stops reading the same task can send only one remote request", async (t) => {
+  const f = await fixture();
+  try {
+    const response = await f.request("conversation-1", {
+      requestId: "two-stops",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", {
+      ...task,
+      status: "running",
+      delegation: {
+        ...task.delegation,
+        channelAttempted: true,
+        threadId: "thread-1",
+        submissionAttempted: true,
+      },
+    });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    const stop = t.mock.method(gateway, "stopRun", async () => true);
+    const get = f.db.get.bind(f.db);
+    let reads = 0;
+    let release!: () => void;
+    const bothRead = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    t.mock.method(
+      f.db,
+      "get",
+      async <T>(owner: string, kind: string, id: string): Promise<T | null> => {
+        const value = await get<T>(owner, kind, id);
+        if (kind === "tasks" && id === task.id && reads++ < 2) {
+          if (reads === 2) release();
+          await bothRead;
+        }
+        return value;
+      },
+    );
+    const results = await Promise.allSettled([
+      f.server.agent.control(f.owner, task.id, "cancel"),
+      f.server.agent.control(f.owner, task.id, "cancel"),
+    ]);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    assert.equal(stop.mock.callCount(), 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a terminal checkpoint between stop read and claim is retained", async (t) => {
+  const f = await fixture();
+  try {
+    const response = await f.request("conversation-1", {
+      requestId: "terminal-race",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    const stale = {
+      ...task,
+      status: "running" as const,
+      delegation: {
+        ...task.delegation,
+        channelAttempted: true,
+        threadId: "thread-1",
+        submissionAttempted: true,
+      },
+    };
+    await f.db.put(f.owner, "tasks", {
+      ...stale,
+      delegation: {
+        ...stale.delegation,
+        terminal: "finished",
+        messageIds: ["answer-1"],
+      },
+    });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    const stop = t.mock.method(gateway, "stopRun", async () => true);
+    const get = f.db.get.bind(f.db);
+    let staleOnce = true;
+    t.mock.method(
+      f.db,
+      "get",
+      async <T>(owner: string, kind: string, id: string): Promise<T | null> => {
+        if (kind === "tasks" && id === task.id && staleOnce) {
+          staleOnce = false;
+          return stale as T;
+        }
+        return get<T>(owner, kind, id);
+      },
+    );
+    await assert.rejects(f.server.agent.control(f.owner, task.id, "cancel"), /Task changed/);
+    assert.equal(stop.mock.callCount(), 0);
+    const saved = await get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(saved?.delegation?.terminal, "finished");
+    assert.equal(saved.delegation?.stop, undefined);
+  } finally {
+    await f.close();
+  }
+});
+
+test("an unaccepted stop reply cannot replace a settled original finish", async (t) => {
+  const f = await fixture();
+  try {
+    const response = await f.request("conversation-1", {
+      requestId: "finish-during-stop",
+      botId: "bot-1",
+      prompt: "One answer",
+    });
+    const task = (await response.json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", {
+      ...task,
+      status: "running",
+      delegation: {
+        ...task.delegation,
+        channelAttempted: true,
+        threadId: "thread-1",
+        submissionAttempted: true,
+      },
+    });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    t.mock.method(gateway, "stopRun", async () => {
+      const pending = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+      assert(pending);
+      await f.db.put(f.owner, "tasks", {
+        ...pending,
+        status: "succeeded",
+        result: "Original answer.",
+        delegation: { ...pending.delegation, terminal: "finished", output: "Original answer." },
+      });
+      return false;
+    });
+    const settled = await f.server.agent.control(f.owner, task.id, "cancel");
+    assert.equal(settled.status, "succeeded");
+    assert.equal(settled.result, "Original answer.");
+    assert.equal(settled.delegation?.stop, "unconfirmed");
+  } finally {
+    await f.close();
+  }
+});
+
 test("replayed STOPPED without an accepted scoped stop records original error, not cancellation", async (t) => {
   const f = await fixture();
   try {

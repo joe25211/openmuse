@@ -656,6 +656,7 @@ export class AgentService {
           updatedAt: date(),
           result: "Cancelled before Bot submission.",
         },
+        true,
       );
       if (!cancelled) throw new AppError("Task changed; refresh and try again", 409);
       this.worker.abort(task.id);
@@ -682,6 +683,7 @@ export class AgentService {
         updatedAt: date(),
         error: "Stop unconfirmed. OpenMuse is checking the original Bot run.",
       },
+      true,
     );
     if (!requested) throw new AppError("Task changed; refresh and try again", 409);
     this.worker.abort(task.id);
@@ -706,18 +708,27 @@ export class AgentService {
         task.id,
         { status: latest.status, delegation: latest.delegation },
         {
-          status: accepted ? "cancelled" : "outcome_unknown",
+          status: accepted
+            ? "cancelled"
+            : terminal.has(latest.status)
+              ? latest.status
+              : "outcome_unknown",
           delegation: {
             ...latest.delegation,
             stop: accepted ? "confirmed" : "unconfirmed",
             ...(accepted ? { stoppedAt: date() } : {}),
           },
           updatedAt: date(),
-          error: accepted ? null : "Stop unconfirmed. OpenMuse is checking the original Bot run.",
+          error: accepted
+            ? null
+            : terminal.has(latest.status)
+              ? latest.error
+              : "Stop unconfirmed. OpenMuse is checking the original Bot run.",
           result: accepted
             ? "Bot stop confirmed. Started external changes may remain."
             : latest.result,
         },
+        true,
       );
       if (updated) return updated;
     }
