@@ -662,7 +662,9 @@ export function TaskDetail({ taskId }: { taskId: string }) {
           {task.delegation && (
             <Card style={{ gap: 8 }}>
               <Text style={s.heading}>Exact context sent</Text>
-              <AssistantResponse content={task.delegation.sentContext} />
+              <Text selectable style={s.text}>
+                {task.delegation.sentContext}
+              </Text>
             </Card>
           )}
           {!!(task.result || task.delegation?.output) && (
