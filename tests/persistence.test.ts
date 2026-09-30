@@ -31,3 +31,37 @@ test("idle Postgres client errors are logged instead of crashing the process", a
     await pool.end();
   }
 });
+
+test("exact delegation CAS rejects newer nested evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openmuse-exact-cas-"));
+  const db = await createStore({ dataDir: root });
+  try {
+    const delegation = { runId: "run-1", submissionAttempted: true };
+    await db.put("owner", "tasks", { id: "task-1", status: "running", delegation });
+    await db.compareAndSwap(
+      "owner",
+      "tasks",
+      "task-1",
+      { status: "running" },
+      { delegation: { ...delegation, terminal: "finished" } },
+    );
+    assert.equal(
+      await db.compareAndSwap(
+        "owner",
+        "tasks",
+        "task-1",
+        { status: "running", delegation },
+        { status: "cancelled" },
+        true,
+      ),
+      null,
+    );
+    assert.deepEqual(
+      (await db.get<{ delegation: object }>("owner", "tasks", "task-1"))?.delegation,
+      { ...delegation, terminal: "finished" },
+    );
+  } finally {
+    await db.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

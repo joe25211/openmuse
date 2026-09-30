@@ -93,3 +93,39 @@ test("OpenBot gateway forwards a channel run without forwarding the OpenMuse ses
     await once(server, "close");
   }
 });
+
+test("scoped stop accepts only the explicit matching STOPPED reply", async () => {
+  let reply: unknown = { stopped: true, interrupt: { type: "RUN_ERROR", code: "STOPPED" } };
+  const requests: { path: string; body: string }[] = [];
+  const server = createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    requests.push({ path: request.url ?? "", body });
+    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(reply));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const address = server.address();
+    assert(address && typeof address !== "string");
+    const gateway = new OpenBotGateway({
+      openbotEnabled: true,
+      openbotBaseUrl: `http://127.0.0.1:${address.port}`,
+    } as Config);
+    assert.equal(await gateway.stopRun("bot-1", "thread-1", "run-1"), true);
+    assert.deepEqual(requests[0], {
+      path: "/api/copilotkit/agent/bot-1/stop/thread-1",
+      body: '{"runId":"run-1"}',
+    });
+    for (reply of [
+      { stopped: true },
+      { stopped: false, interrupt: { type: "RUN_ERROR", code: "STOPPED" } },
+      { stopped: true, interrupt: { type: "RUN_ERROR", code: "STOPPED" }, runId: "other" },
+      { stopped: true, interrupt: { type: "RUN_ERROR", code: "OTHER" } },
+    ])
+      assert.equal(await gateway.stopRun("bot-1", "thread-1", "run-1"), false);
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});

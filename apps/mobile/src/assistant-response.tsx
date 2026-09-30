@@ -1,6 +1,10 @@
 import { useCallback, useState } from "react";
 import { Linking, Text, type TextStyle } from "react-native";
-import Markdown, { type MarkdownStyles, type RenderRules } from "react-native-markdown-renderer";
+import Markdown, {
+  type MarkdownStyles,
+  type RenderRules,
+  renderRules,
+} from "react-native-markdown-renderer";
 import { assistantMarkdown, isSafeAssistantUrl } from "./assistant-markdown";
 import { colors, ErrorNotice } from "./ui";
 
@@ -23,6 +27,16 @@ const renderCodeBlock: RenderRules["fence"] = (node, _children, _parent, styles)
   </Text>
 );
 const rules: RenderRules = {
+  link: (node, children, parent, styles, ...args) =>
+    renderRules.link(
+      node,
+      node.children.map((child) => child.content).join("") === node.attributes.href
+        ? children
+        : [...children, ` (${node.attributes.href})`],
+      parent,
+      styles,
+      ...args,
+    ),
   textgroup: (node, children) => (
     <Text key={node.key} selectable style={textStyle}>
       {children}
