@@ -34,6 +34,7 @@ import type {
   RunEvent,
 } from "../../../packages/domain/src/agent";
 import { useAgentWorkspace } from "./agent-workspace";
+import { AssistantResponse } from "./assistant-response";
 import { delegatedTaskStatus } from "./delegated-chat";
 import { ActivityScreen, ConnectionsScreen } from "./screens";
 import {
@@ -658,11 +659,24 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               ))}
             </Card>
           )}
-          {!!task.result && (
-            <Card style={{ backgroundColor: colors.green }}>
-              <Text selectable style={s.text}>
-                {task.delegation ? task.result : resultSummary(task.result)}
-              </Text>
+          {task.delegation && (
+            <Card style={{ gap: 8 }}>
+              <Text style={s.heading}>Exact context sent</Text>
+              <AssistantResponse content={task.delegation.sentContext} />
+            </Card>
+          )}
+          {!!(task.result || task.delegation?.output) && (
+            <Card style={{ backgroundColor: colors.green, gap: 8 }}>
+              {task.delegation ? (
+                <>
+                  <Text style={s.heading}>Saved result</Text>
+                  <AssistantResponse content={task.result || task.delegation.output || ""} />
+                </>
+              ) : (
+                <Text selectable style={s.text}>
+                  {resultSummary(task.result || "")}
+                </Text>
+              )}
             </Card>
           )}
           <ErrorNotice error={task.error ?? undefined} />
