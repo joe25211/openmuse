@@ -20,7 +20,7 @@ import {
 } from "react-native";
 import { z } from "zod";
 import type { AgentTask, RunEvent } from "../../../packages/domain/src/agent";
-import { ArtifactCard } from "./agent-ui";
+import { ArtifactCard, DelegatedRetryControl } from "./agent-ui";
 import { useAgentWorkspace } from "./agent-workspace";
 import { AssistantResponse } from "./assistant-response";
 import { BackgroundUpdates } from "./background-updates";
@@ -1119,6 +1119,7 @@ function DelegatedTaskPane({ task }: { task: AgentTask }) {
               ? "Review task"
               : "Open task details"}
         </Button>
+        <DelegatedRetryControl key={savedTask.id} task={savedTask} />
       </Card>
       <Card style={{ gap: 8 }}>
         <Text style={s.heading}>Exact context sent</Text>

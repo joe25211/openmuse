@@ -70,6 +70,34 @@ export class Store {
     );
     return (result.rows[0]?.data as T | undefined) ?? null;
   }
+  async reserveDelegatedRetry<T extends { id: string }>(
+    owner: string,
+    sourceTaskId: string,
+    rootTaskId: string,
+    expectedTaskId: string,
+    reservation: T,
+  ): Promise<T | null> {
+    const result = await this.db.query(
+      `WITH source AS (
+         SELECT data FROM records WHERE owner=$1 AND kind='tasks' AND id=$2
+         AND data->>'status' IN ('failed','outcome_unknown')
+         AND COALESCE(data->>'retryRootTaskId',id)=$3
+         FOR UPDATE
+       )
+       INSERT INTO records(owner,kind,id,data)
+       SELECT $1,'delegated-retries',$3,$5::jsonb FROM source
+       WHERE NOT EXISTS (
+         SELECT 1 FROM records action WHERE action.owner=$1 AND action.kind='actions'
+         AND action.id=source.data->>'actionId'
+         AND action.data->>'status' IN ('awaiting_review','executing','outcome_unknown')
+       )
+       ON CONFLICT(owner,kind,id) DO UPDATE SET data=excluded.data,updated_at=now()
+       WHERE records.data->>'taskId'=$4
+       RETURNING data`,
+      [owner, sourceTaskId, rootTaskId, expectedTaskId, JSON.stringify(reservation)],
+    );
+    return (result.rows[0]?.data as T | undefined) ?? null;
+  }
   async scan<T>(kind: string): Promise<{ owner: string; value: T }[]> {
     const result = await this.db.query(
       "SELECT jsonb_build_object('owner',owner,'value',data) AS data FROM records WHERE kind=$1 ORDER BY updated_at ASC",

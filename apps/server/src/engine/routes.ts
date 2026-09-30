@@ -40,6 +40,18 @@ export function agentRoutes(service: AgentService): Hono<{ Variables: { owner: s
       .parse(await c.req.json());
     return c.json(await service.control(c.get("owner"), c.req.param("id"), action));
   });
+  app.post("/tasks/:id/retry-delegation", async (c) => {
+    const { key, acknowledged } = z
+      .object({
+        key: z.string().trim().min(8).max(100),
+        acknowledged: z.literal(true),
+      })
+      .parse(await c.req.json());
+    return c.json(
+      await service.retryDelegation(c.get("owner"), c.req.param("id"), key, acknowledged),
+      201,
+    );
+  });
   app.post("/tasks/:id/input", async (c) => {
     const body = z
       .object({

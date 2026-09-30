@@ -47,6 +47,13 @@ import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const date = () => new Date().toISOString();
 const terminal = new Set(["succeeded", "failed", "cancelled"]);
+interface DelegatedRetryReservation {
+  id: string;
+  sourceTaskId: string;
+  taskId: string;
+  runId: string;
+  key: string;
+}
 const redact = (text: string) =>
   text
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
@@ -209,6 +216,10 @@ export class AgentService {
       // Recover publications if the process exited after committing an outcome.
       for (const { owner, value } of await this.db.scan<AgentTask>("tasks"))
         await this.publishOutcome(owner, value);
+      for (const { owner, value } of await this.db.scan<DelegatedRetryReservation>(
+        "delegated-retries",
+      ))
+        await this.materializeRetry(owner, value);
       for (const { owner, value } of await this.db.scan<Monitor>("monitors"))
         await this.activateMonitor(owner, value);
       for (const { owner, value } of await this.db.scan<Idea>("ideas"))
@@ -520,6 +531,130 @@ export class AgentService {
     )
       throw new AppError("This request already has a different task", 409);
     return latest;
+  }
+  private async materializeRetry(owner: string, reservation: DelegatedRetryReservation) {
+    const existing = await this.db.get<AgentTask>(owner, "tasks", reservation.taskId);
+    if (existing) return existing;
+    const source = await this.getTask(owner, reservation.sourceTaskId);
+    if (!source.delegation) throw new AppError("Original delegated task is unavailable", 409);
+    const delegation = source.delegation;
+    const excerptStart = delegation.sentContext.indexOf("\nIncluded excerpt:\n");
+    const excerptEnd = delegation.sentContext.lastIndexOf("\nConversation ID: ");
+    const fallbackExcerpt =
+      delegation.fallbackExcerpt ??
+      (excerptStart >= 0 && excerptEnd > excerptStart
+        ? delegation.sentContext.slice(excerptStart + "\nIncluded excerpt:\n".length, excerptEnd)
+        : undefined);
+    const runLine = `\nRun ID: ${delegation.runId}`;
+    const runLineAt = delegation.sentContext.lastIndexOf(runLine);
+    const createdAt = date();
+    const replacement: AgentTask = {
+      ...source,
+      id: reservation.taskId,
+      retryOfTaskId: source.id,
+      retryRootTaskId: reservation.id,
+      retryKey: reservation.key,
+      status: "queued",
+      nextRunAt: undefined,
+      plan: [],
+      evidence: [],
+      input: {},
+      state: { connectionId: source.state.connectionId ?? null },
+      createdAt,
+      updatedAt: createdAt,
+      attempts: 0,
+      leaseId: null,
+      leaseUntil: null,
+      artifactIds: [],
+      actionId: null,
+      result: undefined,
+      error: null,
+      question: undefined,
+      delegation: {
+        conversationId: delegation.conversationId,
+        requestId: delegation.requestId,
+        botId: delegation.botId,
+        botName: delegation.botName,
+        brief: delegation.brief,
+        sourcePath: delegation.sourcePath,
+        resourcePath: delegation.resourcePath,
+        fallbackExcerpt,
+        readMode: delegation.readMode,
+        runId: reservation.runId,
+        sentContext:
+          runLineAt >= 0
+            ? `${delegation.sentContext.slice(0, runLineAt)}\nRun ID: ${reservation.runId}${delegation.sentContext.slice(runLineAt + runLine.length)}`
+            : sentContext({
+                prompt: source.prompt,
+                brief: delegation.brief,
+                sourcePath: delegation.sourcePath,
+                resourcePath: delegation.resourcePath,
+                excerpt: delegation.readMode === "direct" ? undefined : fallbackExcerpt,
+                mode: delegation.readMode,
+                conversationId: delegation.conversationId,
+                requestId: delegation.requestId,
+                botId: delegation.botId,
+                runId: reservation.runId,
+              }),
+        channelAttempted: false,
+        submissionAttempted: false,
+      },
+    };
+    await this.db.insertIfAbsent(owner, "tasks", replacement);
+    return this.getTask(owner, reservation.taskId);
+  }
+  async retryDelegation(owner: string, id: string, key: string, acknowledged: boolean) {
+    if (!acknowledged)
+      throw new AppError(
+        "Acknowledge that the original run may still complete and an external effect could repeat",
+        422,
+      );
+    let source = await this.getTask(owner, id);
+    if (!source.delegation) throw new AppError("Only delegated tasks use warned retry", 409);
+    const rootId = source.retryRootTaskId ?? source.id;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const prior = (await this.db.list<AgentTask>(owner, "tasks")).find(
+        (task) =>
+          task.retryRootTaskId === rootId && task.retryOfTaskId === id && task.retryKey === key,
+      );
+      if (prior) return prior;
+      const saved = await this.db.get<DelegatedRetryReservation>(
+        owner,
+        "delegated-retries",
+        rootId,
+      );
+      if (saved?.sourceTaskId === id && saved.key === key)
+        return this.materializeRetry(owner, saved);
+      if (saved && saved.taskId !== id)
+        throw new AppError("Review the latest linked attempt before retrying again", 409);
+      source = await this.getTask(owner, id);
+      if (!source.delegation) throw new AppError("Only delegated tasks use warned retry", 409);
+      if (source.status !== "failed" && source.status !== "outcome_unknown")
+        throw new AppError("Only a confirmed failure or Outcome unknown can be retried", 409);
+      if (source.actionId) {
+        const action = await this.db.get<ActionProposal>(owner, "actions", source.actionId);
+        if (action && ["awaiting_review", "executing", "outcome_unknown"].includes(action.status))
+          throw new AppError("Check the linked reviewed action before retrying", 409);
+      }
+      if (!this.openbot) throw new AppError("OpenBot is unavailable", 503);
+      await this.openbot.eligibleBot(source.delegation.botId);
+      const reservation: DelegatedRetryReservation = {
+        id: rootId,
+        sourceTaskId: id,
+        taskId: randomUUID(),
+        runId: randomUUID(),
+        key,
+      };
+      const won = await this.db.reserveDelegatedRetry(
+        owner,
+        id,
+        rootId,
+        saved?.taskId ?? "",
+        reservation,
+      );
+      if (won) return this.materializeRetry(owner, won);
+    }
+    throw new AppError("Retry changed; refresh and try again", 409);
   }
   async control(owner: string, id: string, action: "pause" | "resume" | "cancel" | "retry") {
     const task = await this.getTask(owner, id);

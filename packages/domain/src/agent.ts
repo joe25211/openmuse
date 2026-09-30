@@ -58,6 +58,9 @@ export interface TaskStep {
 }
 export interface AgentTask {
   id: string;
+  retryOfTaskId?: string;
+  retryRootTaskId?: string;
+  retryKey?: string;
   title: string;
   prompt: string;
   kind: "agent" | "document" | "monitor" | "finance" | "plan" | "openbot";

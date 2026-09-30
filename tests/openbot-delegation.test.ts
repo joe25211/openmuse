@@ -29,7 +29,13 @@ async function fixture() {
     else if (path === "/api/channels") {
       channelCalls++;
       response.end(
-        JSON.stringify({ channel: { id: "channel-1", threadId: "thread-1", agentIds: ["bot-1"] } }),
+        JSON.stringify({
+          channel: {
+            id: `channel-${channelCalls}`,
+            threadId: `thread-${channelCalls}`,
+            agentIds: ["bot-1"],
+          },
+        }),
       );
     } else response.writeHead(404).end("{}");
   });
@@ -102,6 +108,336 @@ async function fixture() {
     },
   };
 }
+
+test("warned retry is authenticated, idempotent and reserves one fresh linked attempt", async (t) => {
+  const f = await fixture();
+  try {
+    const created = (await (
+      await f.request("conversation-1", {
+        requestId: "retry-request",
+        botId: "bot-1",
+        prompt: "One answer",
+      })
+    ).json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", {
+      ...created,
+      status: "failed",
+      error: "Confirmed Bot error",
+    });
+    const path = `/api/agent/tasks/${created.id}/retry-delegation`;
+    const call = (body: unknown, authorized = true) =>
+      f.server.app.request(path, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(authorized ? { Authorization: `Bearer ${f.token}` } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+    const key = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    assert.equal((await call({ key, acknowledged: true }, false)).status, 401);
+    assert.equal((await call({ key })).status, 422);
+    assert.equal((await call({ key, acknowledged: false })).status, 422);
+    assert.equal((await call({ key, acknowledged: true })).status, 201);
+    const [a, b] = await Promise.all([
+      call({ key, acknowledged: true }),
+      call({ key, acknowledged: true }),
+    ]);
+    const first = (await a.json()) as AgentTask;
+    assert.equal(((await b.json()) as AgentTask).id, first.id);
+    assert.equal(first.retryOfTaskId, created.id);
+    assert.equal(first.retryRootTaskId, created.id);
+    assert.notEqual(first.delegation?.runId, created.delegation?.runId);
+    assert.equal(first.delegation?.channelAttempted, false);
+    assert.equal(
+      (await call({ key: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", acknowledged: true })).status,
+      409,
+    );
+    assert.equal((await f.db.list<AgentTask>(f.owner, "tasks")).length, 2);
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    const run = t.mock.method(gateway, "runText", async () => ({
+      terminal: "error" as const,
+      messageIds: [],
+    }));
+    await f.server.agent.worker.tick();
+    const failed = await f.db.get<AgentTask>(f.owner, "tasks", first.id);
+    assert.equal(failed?.status, "failed");
+    assert.equal(failed.delegation?.threadId, "thread-1");
+    assert.equal(run.mock.callCount(), 1);
+    const nextKey = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const nextResponse = await f.server.app.request(
+      `/api/agent/tasks/${first.id}/retry-delegation`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${f.token}` },
+        body: JSON.stringify({ key: nextKey, acknowledged: true }),
+      },
+    );
+    assert.equal(nextResponse.status, 201);
+    const next = (await nextResponse.json()) as AgentTask;
+    assert.equal(next.retryOfTaskId, first.id);
+    assert.equal(next.retryRootTaskId, created.id);
+    assert.notEqual(next.delegation?.runId, first.delegation?.runId);
+    const oldKey = await call({ key, acknowledged: true });
+    assert.equal(oldKey.status, 201);
+    assert.equal(((await oldKey.json()) as AgentTask).id, first.id);
+    assert.equal((await f.db.list<AgentTask>(f.owner, "tasks")).length, 3);
+    await f.server.agent.worker.tick();
+    assert.equal(
+      (await f.db.get<AgentTask>(f.owner, "tasks", next.id))?.delegation?.threadId,
+      "thread-2",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("explicit retry of an unknown replacement keeps late original outcome on the original", async (t) => {
+  const f = await fixture();
+  try {
+    const original = (await (
+      await f.request("conversation-1", {
+        requestId: "retry-unknown",
+        botId: "bot-1",
+        prompt: "One answer",
+      })
+    ).json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", {
+      ...original,
+      status: "outcome_unknown",
+      nextRunAt: "2099-01-01T00:00:00Z",
+      delegation: {
+        ...original.delegation,
+        channelAttempted: true,
+        channelId: "channel-old",
+        threadId: "thread-old",
+        submissionAttempted: true,
+      },
+    });
+    const first = await f.server.agent.retryDelegation(
+      f.owner,
+      original.id,
+      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      true,
+    );
+    await f.db.put(f.owner, "tasks", {
+      ...first,
+      status: "outcome_unknown",
+      nextRunAt: "2099-01-01T00:00:00Z",
+      delegation: {
+        ...first.delegation,
+        channelAttempted: true,
+        channelId: "channel-new",
+        threadId: "thread-new",
+        submissionAttempted: true,
+      },
+    });
+    const second = await f.server.agent.retryDelegation(
+      f.owner,
+      first.id,
+      "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      true,
+    );
+    assert.equal(second.retryOfTaskId, first.id);
+    assert.equal(second.retryRootTaskId, original.id);
+    assert.equal(
+      (await f.db.get<AgentTask>(f.owner, "tasks", original.id))?.status,
+      "outcome_unknown",
+    );
+    await f.db.compareAndSwap(
+      f.owner,
+      "tasks",
+      original.id,
+      { status: "outcome_unknown" },
+      { nextRunAt: new Date(0).toISOString() },
+    );
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    t.mock.method(gateway, "reconnectRun", async () => ({
+      terminal: "finished" as const,
+      messageIds: ["late-original"],
+    }));
+    t.mock.method(gateway, "textResult", async () => "Late original answer.");
+    await f.server.agent.worker.tick();
+    const settled = await f.db.get<AgentTask>(f.owner, "tasks", original.id);
+    assert.equal(settled?.status, "succeeded");
+    assert.equal(settled.result, "Late original answer.");
+    assert.equal(
+      (await f.db.get<AgentTask>(f.owner, "tasks", first.id))?.status,
+      "outcome_unknown",
+    );
+    const latest = await f.db.get<AgentTask>(f.owner, "tasks", second.id);
+    assert.notEqual(latest?.result, "Late original answer.");
+    assert.equal(
+      (
+        await f.server.agent.retryDelegation(
+          f.owner,
+          original.id,
+          "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          true,
+        )
+      ).id,
+      first.id,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("interrupted retry reservation reuses its task and run after restart", async (t) => {
+  const f = await fixture();
+  try {
+    const created = (await (
+      await f.request("conversation-1", {
+        requestId: "retry-interrupted",
+        botId: "bot-1",
+        prompt: "One answer",
+      })
+    ).json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", { ...created, status: "failed" });
+    const insert = f.db.insertIfAbsent.bind(f.db);
+    let interrupted = false;
+    t.mock.method(
+      f.db,
+      "insertIfAbsent",
+      async (owner: string, kind: string, value: { id: string }) => {
+        if (kind === "tasks" && !interrupted) {
+          interrupted = true;
+          throw new Error("interrupted after reservation");
+        }
+        return insert(owner, kind, value);
+      },
+    );
+    const key = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    await assert.rejects(f.server.agent.retryDelegation(f.owner, created.id, key, true));
+    const reservation = await f.db.get<{ taskId: string; runId: string }>(
+      f.owner,
+      "delegated-retries",
+      created.id,
+    );
+    assert(reservation);
+    await f.restart();
+    const recovered = await f.server.agent.retryDelegation(f.owner, created.id, key, true);
+    assert.equal(recovered.id, reservation.taskId);
+    assert.equal(recovered.delegation?.runId, reservation.runId);
+    assert.equal((await f.db.list<AgentTask>(f.owner, "tasks")).length, 2);
+  } finally {
+    await f.close();
+  }
+});
+
+test("warned retry does not bypass a linked action with an uncertain outcome", async () => {
+  const f = await fixture();
+  try {
+    const task = (await (
+      await f.request("conversation-1", {
+        requestId: "retry-action",
+        botId: "bot-1",
+        prompt: "One answer",
+      })
+    ).json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", { ...task, status: "failed", actionId: "action-1" });
+    await f.db.put(f.owner, "actions", { id: "action-1", status: "outcome_unknown" });
+    const response = await f.server.app.request(`/api/agent/tasks/${task.id}/retry-delegation`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${f.token}` },
+      body: JSON.stringify({ key: "retry-action-key", acknowledged: true }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal(await f.db.get(f.owner, "delegated-retries", task.id), null);
+  } finally {
+    await f.close();
+  }
+});
+
+test("late original completion during Bot eligibility prevents a stale retry claim", async (t) => {
+  const f = await fixture();
+  try {
+    const task = (await (
+      await f.request("conversation-1", {
+        requestId: "retry-race",
+        botId: "bot-1",
+        prompt: "One answer",
+      })
+    ).json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", { ...task, status: "outcome_unknown" });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    let entered = () => {};
+    let release = () => {};
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const eligible = gateway.eligibleBot.bind(gateway);
+    t.mock.method(gateway, "eligibleBot", async (botId: string) => {
+      entered();
+      await blocked;
+      return eligible(botId);
+    });
+    const retry = f.server.agent.retryDelegation(f.owner, task.id, "retry-race-key", true);
+    await waiting;
+    await f.db.compareAndSwap(
+      f.owner,
+      "tasks",
+      task.id,
+      { status: "outcome_unknown" },
+      { status: "succeeded", result: "Late original answer" },
+    );
+    release();
+    await assert.rejects(retry);
+    assert.equal(await f.db.get(f.owner, "delegated-retries", task.id), null);
+    assert.equal((await f.db.list<AgentTask>(f.owner, "tasks")).length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("retry retains the exact safe supplied excerpt from a saved attempt", async (t) => {
+  const f = await fixture();
+  try {
+    const original = (await (
+      await f.request("conversation-1", {
+        requestId: "retry-context",
+        botId: "bot-1",
+        prompt: "Summarize the note",
+        sourcePath: "missing-note.txt",
+        suppliedText: "Blue garden note for the summary.",
+      })
+    ).json()) as AgentTask;
+    assert(original.delegation);
+    assert.match(original.delegation?.sentContext ?? "", /Blue garden note/);
+    await f.db.put(f.owner, "tasks", {
+      ...original,
+      status: "failed",
+      delegation: { ...original.delegation, fallbackExcerpt: undefined },
+    });
+    const retry = await f.server.agent.retryDelegation(
+      f.owner,
+      original.id,
+      "retry-context-key",
+      true,
+    );
+    assert.equal(retry.delegation?.fallbackExcerpt, "Blue garden note for the summary.");
+    assert.equal(
+      retry.delegation?.sentContext.replace(retry.delegation.runId, original.delegation.runId),
+      original.delegation.sentContext,
+    );
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    const sent = t.mock.method(gateway, "runText", async () => ({
+      terminal: "error" as const,
+      messageIds: [],
+    }));
+    await f.server.agent.worker.tick();
+    assert.match(String(sent.mock.calls[0]?.arguments[3]), /Blue garden note for the summary/);
+  } finally {
+    await f.close();
+  }
+});
 
 test("scoped registration signs the owner and exact run tuple separately from the bearer", async () => {
   let received: Record<string, string> | undefined;

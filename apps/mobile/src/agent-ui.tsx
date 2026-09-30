@@ -19,7 +19,7 @@ import {
   Users,
   X,
 } from "lucide-react-native";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Image, Linking, Pressable, Text, View } from "react-native";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import type { Artifact, BrowserSession } from "../../../packages/domain/src";
@@ -72,6 +72,73 @@ function errorText(e: unknown) {
 }
 function activeTask(task: AgentTask) {
   return !["succeeded", "failed", "cancelled"].includes(task.status);
+}
+export function DelegatedRetryControl({ task }: { task: AgentTask }) {
+  const { open } = useWorkspace();
+  const { data, mutate } = useAgentWorkspace();
+  const [showWarning, setShowWarning] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const key = useRef(`${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const previousTaskId = task.retryOfTaskId;
+  const replacement = data?.tasks.find((candidate) => candidate.retryOfTaskId === task.id);
+  const canRetry =
+    task.delegation && (task.status === "failed" || task.status === "outcome_unknown");
+  if (!task.delegation) return null;
+  return (
+    <View style={{ gap: 8 }}>
+      {previousTaskId && (
+        <Button small onPress={() => open({ type: "task", taskId: previousTaskId })}>
+          Review previous attempt
+        </Button>
+      )}
+      {replacement ? (
+        <Button small onPress={() => open({ type: "task", taskId: replacement.id })}>
+          Review replacement attempt · {delegatedTaskStatus(replacement)}
+        </Button>
+      ) : canRetry ? (
+        showWarning ? (
+          <Card style={{ gap: 8 }}>
+            <Text style={s.heading}>Before you retry</Text>
+            <Text style={s.text}>
+              The original Bot run may still complete. Retrying could repeat an external effect.
+              Review the original attempt and any linked action before proceeding.
+            </Text>
+            <CheckRow
+              label="I understand the original run may still complete and an external effect could repeat"
+              checked={acknowledged}
+              onPress={() => setAcknowledged((value) => !value)}
+            />
+            <Button
+              small
+              busy={busy}
+              disabled={!acknowledged}
+              onPress={() => {
+                if (!acknowledged || busy) return;
+                setBusy(true);
+                setError("");
+                void mutate<AgentTask>(`/tasks/${task.id}/retry-delegation`, {
+                  key: key.current,
+                  acknowledged: true,
+                })
+                  .then((next) => open({ type: "task", taskId: next.id }))
+                  .catch((cause) => setError(errorText(cause)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Proceed with new attempt
+            </Button>
+            <ErrorNotice error={error} />
+          </Card>
+        ) : (
+          <Button small icon={RefreshCw} onPress={() => setShowWarning(true)}>
+            Retry Bot task
+          </Button>
+        )
+      ) : null}
+    </View>
+  );
 }
 export function AgentStatus() {
   const { data, error, refresh } = useAgentWorkspace();
@@ -466,6 +533,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 : "Cancelled before Bot submission."}
             </Text>
           )}
+          <DelegatedRetryControl key={task.id} task={task} />
           {!!task.delegation?.lateOutput && (
             <Card style={{ gap: 8 }}>
               <Text style={s.heading}>Late Bot output · {stamp(task.delegation.lateOutputAt)}</Text>
