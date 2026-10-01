@@ -121,6 +121,7 @@ export class Store {
            (action.data->>'kind'='file.replace_text' AND task.data->>'kind'='openbot'
             AND task.data->>'status'='succeeded' AND task.data->>'actionId'=action.id
             AND task.data->'delegation'->>'readMode'='direct'
+            AND task.data->'delegation'->>'replacementIntent'='reviewed_replace_text'
             AND task.data->'delegation'->>'runId'=action.data->>'sourceRunId'
             AND task.data->'delegation'->>'resourcePath'=action.data->'data'->>'path'
             AND NOT EXISTS (

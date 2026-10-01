@@ -150,6 +150,7 @@ function sentContext(input: {
   brief?: string;
   sourcePath?: string;
   resourcePath?: string;
+  replacementIntent?: "reviewed_replace_text";
   excerpt?: string;
   mode?: "direct" | "excerpt" | "supplied";
   conversationId: string;
@@ -168,7 +169,9 @@ function sentContext(input: {
     ...(input.mode === "direct" && input.resourcePath
       ? [`Resource ID: ${hash(input.resourcePath).slice(0, 16)}`]
       : []),
-    ...(input.mode === "direct" && input.resourcePath
+    ...(input.mode === "direct" &&
+    input.resourcePath &&
+    input.replacementIntent === "reviewed_replace_text"
       ? [
           'For an explicitly requested actual text replacement of this named resource, you may append exactly one final fenced openmuse-action JSON block: {"kind":"file.replace_text","target":"named-resource","resourceId":"<Resource ID above>","expectedText":"<complete exact current UTF-8 text>","replacementText":"<complete replacement UTF-8 text>"}. OpenMuse verifies the current text and asks the person to review; you cannot change the file. For a draft, suggestion, unsupported action, or incomplete text, give useful copyable prose without this block.',
         ]
@@ -386,6 +389,7 @@ export class AgentService {
       prompt: string;
       brief?: string;
       sourcePath?: string;
+      replacementIntent?: "reviewed_replace_text";
       suppliedText?: string;
     },
   ) {
@@ -426,6 +430,8 @@ export class AgentService {
     const id = hash(`task:${key}`);
     const existing = await this.db.get<AgentTask>(owner, "tasks", id);
     const safePrompt = redact(input.prompt.trim());
+    if (input.replacementIntent && !input.sourcePath)
+      throw new AppError("A reviewed replacement needs a named local file", 422);
     const safeBrief = input.brief ? redact(input.brief.trim()) : undefined;
     const resourcePath = input.sourcePath
       ? `${hash(owner).slice(0, 24)}/${input.sourcePath}`
@@ -472,6 +478,7 @@ export class AgentService {
         existing.prompt !== safePrompt ||
         existing.delegation.brief !== safeBrief ||
         existing.delegation.sourcePath !== input.sourcePath ||
+        existing.delegation.replacementIntent !== input.replacementIntent ||
         existing.delegation.resourcePath !== resourcePath ||
         safeIncludedText(existing.delegation.fallbackExcerpt) !== fallbackExcerpt
       )
@@ -514,6 +521,7 @@ export class AgentService {
         brief: safeBrief,
         sentContext: formatted(runId, bot.id),
         sourcePath: input.sourcePath,
+        replacementIntent: input.replacementIntent,
         resourcePath,
         fallbackExcerpt,
         readMode: mode,
@@ -530,6 +538,7 @@ export class AgentService {
       latest.prompt !== safePrompt ||
       latest.delegation.brief !== safeBrief ||
       latest.delegation.sourcePath !== input.sourcePath ||
+      latest.delegation.replacementIntent !== input.replacementIntent ||
       latest.delegation.resourcePath !== resourcePath ||
       latest.delegation.fallbackExcerpt !== fallbackExcerpt ||
       latest.delegation.botId !== bot.id ||
@@ -583,6 +592,7 @@ export class AgentService {
         botName: delegation.botName,
         brief: delegation.brief,
         sourcePath: delegation.sourcePath,
+        replacementIntent: delegation.replacementIntent,
         resourcePath: delegation.resourcePath,
         fallbackExcerpt,
         readMode: delegation.readMode,
@@ -594,6 +604,7 @@ export class AgentService {
                 prompt: source.prompt,
                 brief: delegation.brief,
                 sourcePath: delegation.sourcePath,
+                replacementIntent: delegation.replacementIntent,
                 resourcePath: delegation.resourcePath,
                 excerpt: delegation.readMode === "direct" ? undefined : fallbackExcerpt,
                 mode: delegation.readMode,
@@ -1471,6 +1482,7 @@ export class AgentService {
         prompt: task.prompt,
         brief: delegation.brief,
         sourcePath: delegation.sourcePath,
+        replacementIntent: delegation.replacementIntent,
         resourcePath: delegation.resourcePath,
         excerpt: delegation.readMode === "direct" ? undefined : safeExcerpt,
         mode: delegation.readMode,
@@ -1546,6 +1558,7 @@ export class AgentService {
               prompt: task.prompt,
               brief: delegation.brief,
               sourcePath: delegation.sourcePath,
+              replacementIntent: delegation.replacementIntent,
               resourcePath: delegation.resourcePath,
               excerpt: delegation.fallbackExcerpt,
               mode: "excerpt",
@@ -1632,7 +1645,7 @@ export class AgentService {
           delegation,
         };
       if (!delegation.output) await save({ output });
-      const proposal = delegatedFileProposal(output, task.prompt, delegation);
+      const proposal = delegatedFileProposal(output, delegation);
       if (proposal && !task.actionId) {
         const rootId = task.retryRootTaskId ?? task.id;
         const retry = await this.db.get<DelegatedRetryReservation>(

@@ -205,11 +205,24 @@ test("terminal Bot proposal is prepared by server while Bot completion remains s
       requestId: "reviewed-file",
       botId: "bot-1",
       sourcePath: "review.txt",
+      replacementIntent: "reviewed_replace_text",
       prompt: "Replace Original in the named file with Reviewed",
     });
     assert.equal(response.status, 201);
     const task = (await response.json()) as AgentTask;
     assert(task.delegation?.resourcePath);
+    assert.equal(task.delegation.replacementIntent, "reviewed_replace_text");
+    assert.equal(
+      (
+        await f.request("conversation-1", {
+          requestId: "reviewed-file",
+          botId: "bot-1",
+          sourcePath: "review.txt",
+          prompt: "Replace Original in the named file with Reviewed",
+        })
+      ).status,
+      409,
+    );
     await f.db.put(f.owner, "tasks", {
       ...task,
       delegation: {
@@ -248,6 +261,31 @@ test("terminal Bot proposal is prepared by server while Bot completion remains s
     assert.equal(action.taskId, task.id);
     assert.equal(action.sourceRunId, task.delegation.runId);
     assert.equal(await readFile(file, "utf8"), "Original\n");
+    const draftResponse = await f.request("conversation-1", {
+      requestId: "draft-file",
+      botId: "bot-1",
+      sourcePath: "review.txt",
+      prompt: "Draft a replacement for Original in the named file",
+    });
+    assert.equal(draftResponse.status, 201);
+    const draft = (await draftResponse.json()) as AgentTask;
+    await f.db.put(f.owner, "tasks", {
+      ...draft,
+      delegation: {
+        ...draft.delegation,
+        readMode: "direct",
+        channelAttempted: true,
+        threadId: "thread-2",
+        submissionAttempted: true,
+        terminal: "finished",
+        messageIds: ["answer-2"],
+      },
+    });
+    await f.server.agent.worker.tick();
+    const draftSaved = await f.db.get<AgentTask>(f.owner, "tasks", draft.id);
+    assert.equal(draftSaved?.status, "succeeded");
+    assert.equal(draftSaved.actionId ?? null, null);
+    assert.equal(draftSaved.result, output);
     const approved = await f.server.app.request(`/api/actions/${action.id}/decide`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${f.token}` },

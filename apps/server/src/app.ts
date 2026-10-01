@@ -226,6 +226,7 @@ export async function createApp(
         prompt: z.string().trim().min(1).max(12000),
         brief: z.string().trim().max(500).optional(),
         sourcePath: z.string().trim().min(1).max(2048).optional(),
+        replacementIntent: z.literal("reviewed_replace_text").optional(),
         suppliedText: z.string().trim().min(1).max(4000).optional(),
       })
       .parse(await c.req.json());

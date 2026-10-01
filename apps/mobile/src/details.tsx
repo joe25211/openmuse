@@ -737,8 +737,8 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
         <Card style={{ gap: 13, marginTop: 16 }}>
           <Text style={s.heading}>File outcome unknown</Text>
           <Text style={s.text}>
-            OpenMuse can settle this only when the file exactly matches the original or reviewed
-            replacement. It will not repeat the write.
+            OpenMuse checks the file and any preserved displaced content before settling this
+            action. It will not repeat the write.
           </Text>
           <Button small busy={busy} onPress={() => void verifyFile()}>
             Check file content

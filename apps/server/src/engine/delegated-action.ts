@@ -18,17 +18,13 @@ const botAction = z
 /** Only a complete, final Bot response block can request an OpenMuse review. */
 export function delegatedFileProposal(
   output: string,
-  prompt: string,
   delegation: TaskDelegation,
 ): ProposalInput | null {
   if (
+    delegation.replacementIntent !== "reviewed_replace_text" ||
     delegation.readMode !== "direct" ||
     !delegation.resourcePath ||
-    !delegation.sourcePath ||
-    !/\b(replace|overwrite|update|edit|change)\b/i.test(prompt) ||
-    /\b(draft|suggest|outline|example|hypothetical|dry[ -]?run)\b|\b(?:do not|don't|without)\s+(?:edit|replace|change|write|apply|overwrite|modify)\b|\bonly\s+copy\s+(?:the\s+)?text\b|\bno\s+changes\b|\bfor\s+review\s+only\b/i.test(
-      prompt,
-    )
+    !delegation.sourcePath
   )
     return null;
   const blocks = [...output.matchAll(/```openmuse-action\s*\n([\s\S]*?)\n```/g)];

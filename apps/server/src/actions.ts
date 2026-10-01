@@ -8,7 +8,12 @@ import {
 } from "../../../packages/domain/src/index.ts";
 import type { Store } from "./db.ts";
 import { AppError } from "./errors.ts";
-import { executeLocalAction, localActionEvidence, prepareLocalAction } from "./local-action.ts";
+import {
+  clearLocalActionBackup,
+  executeLocalAction,
+  localActionEvidence,
+  prepareLocalAction,
+} from "./local-action.ts";
 
 type ComposioAction = Extract<ProposalInput, { kind: "composio.execute" }>;
 function proposalHash(
@@ -84,7 +89,7 @@ export class ActionService {
     if (local) {
       const task = taskId ? await this.db.get<AgentTask>(owner, "tasks", taskId) : null;
       if (
-        !task?.delegation ||
+        task?.delegation?.replacementIntent !== "reviewed_replace_text" ||
         task.delegation.resourcePath !== parsed.data.path ||
         task.delegation.readMode !== "direct" ||
         !["running", "outcome_unknown"].includes(task.status)
@@ -193,6 +198,7 @@ export class ActionService {
           (task.kind !== "openbot" ||
             task.actionId !== proposal.id ||
             task.delegation?.readMode !== "direct" ||
+            task.delegation?.replacementIntent !== "reviewed_replace_text" ||
             task.delegation?.resourcePath !== proposal.data.path ||
             task.delegation?.runId !== proposal.sourceRunId)) ||
         (proposal.kind === "file.replace_text"
@@ -287,7 +293,7 @@ export class ActionService {
       if (input.kind === "file.replace_text") {
         if (!(await this.db.claimLocalFile(owner, this.localClaimId(input.data.path), claimed.id)))
           throw new AppError("Another reviewed action is changing this named file", 409);
-        result = await executeLocalAction(this.options.scopedReadRoot, input);
+        result = await executeLocalAction(this.options.scopedReadRoot, input, claimed.id);
       } else if (input.kind === "composio.execute") {
         if (!this.options.composio) throw new AppError("Composio is not configured", 503);
         result = await this.options.composio.execute(owner, input, claimed.connectionId);
@@ -396,7 +402,7 @@ export class ActionService {
       action.hash
     )
       return action;
-    const outcome = await localActionEvidence(this.options.scopedReadRoot, input);
+    const outcome = await localActionEvidence(this.options.scopedReadRoot, input, action.id);
     if (outcome === "unknown") return action;
     const resolved = await this.db.compareAndSwap<ActionProposal>(
       owner,
@@ -452,6 +458,9 @@ export class ActionService {
       this.localClaimId(input.data.path),
       { actionId: action.id, status: "executing" },
       { status: action.status },
+    );
+    await clearLocalActionBackup(this.options.scopedReadRoot, input, action.id).catch(
+      () => undefined,
     );
   }
   async syncReconciledTask(owner: string, action: ActionProposal): Promise<void> {

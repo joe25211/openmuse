@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -19,6 +19,7 @@ const owner = "file-owner";
 const path = `${createHash("sha256").update(owner).digest("hex").slice(0, 24)}/notes.txt`;
 const oldText = "First line\n";
 const newText = "Reviewed replacement\n";
+const probeActionId = "a".repeat(64);
 const input: ProposalInput = {
   kind: "file.replace_text",
   data: {
@@ -64,6 +65,7 @@ async function fixture() {
       sourcePath: "notes.txt",
       resourcePath: path,
       readMode: "direct",
+      replacementIntent: "reviewed_replace_text",
       runId: "run-1",
       channelAttempted: true,
       submissionAttempted: true,
@@ -93,6 +95,7 @@ test("terminal Bot block is exact, bound to its resource, and draft-only remains
     sourcePath: "notes.txt",
     resourcePath: path,
     readMode: "direct" as const,
+    replacementIntent: "reviewed_replace_text" as const,
     runId: "run-1",
     channelAttempted: true,
     submissionAttempted: true,
@@ -104,19 +107,12 @@ test("terminal Bot block is exact, bound to its resource, and draft-only remains
     expectedText: oldText,
     replacementText: newText,
   })}\n\x60\x60\x60`;
-  assert.deepEqual(delegatedFileProposal(block, "Replace the named file", delegation), input);
-  assert.equal(
-    delegatedFileProposal(block, "Draft a replacement for the named file", delegation),
-    null,
-  );
-  assert.equal(
-    delegatedFileProposal(`${block}\nMore prose`, "Replace the named file", delegation),
-    null,
-  );
+  assert.deepEqual(delegatedFileProposal(block, delegation), input);
+  assert.equal(delegatedFileProposal(block, { ...delegation, replacementIntent: undefined }), null);
+  assert.equal(delegatedFileProposal(`${block}\nMore prose`, delegation), null);
   assert.equal(
     delegatedFileProposal(
       block.replace('"target":"named-resource"', '"target":"elsewhere"'),
-      "Replace the named file",
       delegation,
     ),
     null,
@@ -124,15 +120,11 @@ test("terminal Bot block is exact, bound to its resource, and draft-only remains
   assert.equal(
     delegatedFileProposal(
       block.replace('"replacementText":', '"extra":true,"replacementText":'),
-      "Replace the named file",
       delegation,
     ),
     null,
   );
-  assert.equal(
-    delegatedFileProposal(block, "Replace the named file", { ...delegation, readMode: "excerpt" }),
-    null,
-  );
+  assert.equal(delegatedFileProposal(block, { ...delegation, readMode: "excerpt" }), null);
 });
 
 test("durable review denies without mutation and concurrent approval executes exact replacement once", async () => {
@@ -213,29 +205,37 @@ test("pinned directory rejects symlinks and final content recheck preserves an i
   const f = await fixture();
   try {
     await assert.rejects(
-      executeLocalAction(f.root, { ...input, data: { ...input.data, path: "../notes.txt" } }),
+      executeLocalAction(
+        f.root,
+        { ...input, data: { ...input.data, path: "../notes.txt" } },
+        probeActionId,
+      ),
       /scoped/i,
     );
     await symlink(f.target, join(f.root, path.split("/")[0], "link.txt"));
     await assert.rejects(
-      executeLocalAction(f.root, {
-        ...input,
-        data: { ...input.data, path: `${path.split("/")[0]}/link.txt` },
-      }),
+      executeLocalAction(
+        f.root,
+        {
+          ...input,
+          data: { ...input.data, path: `${path.split("/")[0]}/link.txt` },
+        },
+        probeActionId,
+      ),
       /safe|scoped/i,
     );
     await assert.rejects(
-      executeLocalAction(f.root, input, async () => {
+      executeLocalAction(f.root, input, probeActionId, async () => {
         await writeFile(f.target, "Concurrent edit\n");
       }),
       /changed/i,
     );
     assert.equal(await readFile(f.target, "utf8"), "Concurrent edit\n");
-    assert.equal(await localActionEvidence(f.root, input), "unknown");
+    assert.equal(await localActionEvidence(f.root, input, probeActionId), "unknown");
     await writeFile(f.target, newText);
-    assert.equal(await localActionEvidence(f.root, input), "completed");
+    assert.equal(await localActionEvidence(f.root, input, probeActionId), "unknown");
     await writeFile(f.target, oldText);
-    assert.equal(await localActionEvidence(f.root, input), "not_completed");
+    assert.equal(await localActionEvidence(f.root, input, probeActionId), "not_completed");
   } finally {
     await f.close();
   }
@@ -273,13 +273,49 @@ test("interrupted local write settles only from exact before or after content", 
       ),
       /exact file evidence/i,
     );
-    await writeFile(f.target, newText);
+    const backup = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.before`);
+    await writeFile(f.target, oldText);
+    await link(f.target, backup);
+    const replacement = join(f.root, path.split("/")[0], "replacement.tmp");
+    await writeFile(replacement, newText);
+    await rename(replacement, f.target);
     assert.equal((await f.actions.reconcileLocalFile(owner, proposal.id)).status, "succeeded");
     assert.equal(await readFile(f.target, "utf8"), newText);
     assert.equal(
       (await f.actions.decide(owner, proposal.id, proposal.hash, "approve")).status,
       "succeeded",
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test("edit after final read preserves displaced evidence and leaves the action uncertain", async () => {
+  const f = await fixture();
+  try {
+    const proposal = await f.actions.propose(owner, input, "post-read-edit", f.task.id);
+    const backup = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.before`);
+    await assert.rejects(
+      executeLocalAction(f.root, input, proposal.id, undefined, async () => {
+        await writeFile(f.target, "Concurrent edit after check\n");
+      }),
+      (error: unknown) =>
+        error instanceof Error && "outcomeUnknown" in error && error.outcomeUnknown === true,
+    );
+    assert.equal(await readFile(f.target, "utf8"), newText);
+    assert.equal(await readFile(backup, "utf8"), "Concurrent edit after check\n");
+    await f.db.compareAndSwap(
+      owner,
+      "actions",
+      proposal.id,
+      { status: "awaiting_review" },
+      { status: "outcome_unknown" },
+    );
+    assert.equal(
+      (await f.actions.reconcileLocalFile(owner, proposal.id)).status,
+      "outcome_unknown",
+    );
+    assert.equal(await readFile(backup, "utf8"), "Concurrent edit after check\n");
   } finally {
     await f.close();
   }

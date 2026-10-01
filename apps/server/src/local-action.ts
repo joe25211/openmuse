@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { open, realpath, rename, unlink } from "node:fs/promises";
+import { link, open, realpath, rename, unlink } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { ProposalInput } from "../../../packages/domain/src/index.ts";
 import { AppError } from "./errors.ts";
@@ -47,6 +47,29 @@ async function scopedFile(root: string | undefined, path: string) {
 }
 
 type Scoped = Awaited<ReturnType<typeof scopedFile>>;
+function backupPath(scoped: Scoped, actionId: string) {
+  if (!/^[a-f0-9-]{36,64}$/.test(actionId)) throw new AppError("Invalid action reference", 422);
+  return `/proc/self/fd/${scoped.directory.fd}/.openmuse-review-${actionId}.before`;
+}
+async function backupHash(scoped: Scoped, actionId: string): Promise<string | null> {
+  const path = backupPath(scoped, actionId);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > 64 * 1024) throw new Error("Invalid file evidence");
+    const bytes = await handle.readFile();
+    if (bytes.length > 64 * 1024) throw new Error("Invalid file evidence");
+    return textHash(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } finally {
+    await handle.close();
+  }
+}
 async function readCurrent(scoped: Scoped) {
   const handle = await open(scoped.path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
@@ -90,12 +113,17 @@ export async function prepareLocalAction(root: string | undefined, input: LocalA
 export async function executeLocalAction(
   root: string | undefined,
   input: LocalAction,
+  actionId: string,
   beforeFinalCheck?: () => Promise<void>,
+  beforeRename?: () => Promise<void>,
 ) {
   const { text, scoped, info } = await readScoped(root, input.data.path);
   const temporary = `/proc/self/fd/${scoped.directory.fd}/.openmuse-${randomUUID()}`;
+  let backup = "";
   let attempted = false;
+  let linked = false;
   try {
+    backup = backupPath(scoped, actionId);
     if (textHash(text) !== input.data.expectedSha256)
       throw new AppError("The named file changed. No replacement was made.", 409);
     const replacement = await open(
@@ -109,6 +137,21 @@ export async function executeLocalAction(
     } finally {
       await replacement.close();
     }
+    // A hard link keeps the displaced inode available if another process edits it during commit.
+    await link(scoped.path, backup);
+    linked = true;
+    const original = await open(backup, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const held = await original.stat();
+      if (
+        held.ino !== info.ino ||
+        held.dev !== info.dev ||
+        (await backupHash(scoped, actionId)) !== input.data.expectedSha256
+      )
+        throw new AppError("The named file changed. No replacement was made.", 409);
+    } finally {
+      await original.close();
+    }
     await beforeFinalCheck?.();
     const current = await readCurrent(scoped);
     if (
@@ -117,32 +160,66 @@ export async function executeLocalAction(
       textHash(current.text) !== input.data.expectedSha256
     )
       throw new AppError("The named file changed. No replacement was made.", 409);
+    await beforeRename?.();
     attempted = true;
     await rename(temporary, scoped.path);
     await scoped.directory.sync();
+    if ((await backupHash(scoped, actionId)) !== input.data.expectedSha256)
+      throw new Error("The displaced file changed during replacement");
     return `Replaced the reviewed text in ${input.data.path}`;
   } catch (error) {
     if (attempted)
-      throw Object.assign(new Error("The file write needs exact content reconciliation"), {
-        outcomeUnknown: true,
-        cause: error,
-      });
+      throw Object.assign(
+        new Error(
+          `The file write needs exact content reconciliation. Displaced content is preserved as .openmuse-review-${actionId}.before beside the named file.`,
+        ),
+        {
+          outcomeUnknown: true,
+          cause: error,
+        },
+      );
     throw error;
   } finally {
     await unlink(temporary).catch(() => undefined);
+    if (linked && !attempted) await unlink(backup).catch(() => undefined);
     await scoped.directory.close();
   }
 }
 
-export async function localActionEvidence(root: string | undefined, input: LocalAction) {
+export async function localActionEvidence(
+  root: string | undefined,
+  input: LocalAction,
+  actionId: string,
+) {
   try {
     const { text, scoped } = await readScoped(root, input.data.path);
-    await scoped.directory.close();
+    let displaced: string | null;
+    try {
+      displaced = await backupHash(scoped, actionId);
+    } finally {
+      await scoped.directory.close();
+    }
     const current = textHash(text);
-    if (current === textHash(input.data.replacementText)) return "completed" as const;
+    if (displaced !== null && displaced !== input.data.expectedSha256) return "unknown" as const;
+    if (current === textHash(input.data.replacementText) && displaced === input.data.expectedSha256)
+      return "completed" as const;
     if (current === input.data.expectedSha256) return "not_completed" as const;
   } catch {
     /* Missing or unsafe target leaves the outcome unknown. */
   }
   return "unknown" as const;
+}
+
+export async function clearLocalActionBackup(
+  root: string | undefined,
+  input: LocalAction,
+  actionId: string,
+) {
+  const scoped = await scopedFile(root, input.data.path);
+  try {
+    if ((await backupHash(scoped, actionId)) === input.data.expectedSha256)
+      await unlink(backupPath(scoped, actionId));
+  } finally {
+    await scoped.directory.close();
+  }
 }

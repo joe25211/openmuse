@@ -20,6 +20,7 @@ export interface TaskDelegation {
   sentContext: string;
   sourcePath?: string;
   resourcePath?: string;
+  replacementIntent?: "reviewed_replace_text";
   fallbackExcerpt?: string;
   readMode?: "direct" | "excerpt" | "supplied";
   runId: string;
