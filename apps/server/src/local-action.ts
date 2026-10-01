@@ -258,15 +258,9 @@ export async function localActionEvidence(
     }
     const current = textHash(text);
     const after = textHash(input.data.replacementText);
-    if (
-      displaced !== null &&
-      displaced !== input.data.expectedSha256 &&
-      !(current === input.data.expectedSha256 && displaced === after)
-    )
-      return "unknown" as const;
     if (current === after && displaced === input.data.expectedSha256) return "completed" as const;
-    if (current === input.data.expectedSha256 && (displaced === null || displaced === after))
-      return "not_completed" as const;
+    // The original bytes on the named path cannot prove the exchange never ran:
+    // a later writer could have restored them from the displaced .swap inode.
   } catch {
     /* Missing or unsafe target leaves the outcome unknown. */
   }

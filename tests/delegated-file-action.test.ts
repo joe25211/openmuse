@@ -268,13 +268,13 @@ test("pinned directory rejects symlinks and final content recheck preserves an i
     await writeFile(f.target, newText);
     assert.equal(await localActionEvidence(f.root, input, probeActionId), "unknown");
     await writeFile(f.target, oldText);
-    assert.equal(await localActionEvidence(f.root, input, probeActionId), "not_completed");
+    assert.equal(await localActionEvidence(f.root, input, probeActionId), "unknown");
   } finally {
     await f.close();
   }
 });
 
-test("interrupted local write settles only from exact before or after content", async (t) => {
+test("interrupted local write settles completion only from exact before and after content", async (t) => {
   if (!exchangeSupported) {
     t.skip("Atomic exchange unavailable");
     return;
@@ -327,7 +327,7 @@ test("interrupted local write settles only from exact before or after content", 
   }
 });
 
-test("crash before exchange proves no replacement and clears staged evidence", async (t) => {
+test("crash before exchange retains uncertainty and staged evidence", async (t) => {
   if (!exchangeSupported) {
     t.skip("Atomic exchange unavailable");
     return;
@@ -346,9 +346,60 @@ test("crash before exchange proves no replacement and clears staged evidence", a
       { status: "executing" },
     );
     await f.db.recoverInterruptedActions();
-    assert.equal((await f.actions.reconcileLocalFile(owner, proposal.id)).status, "failed");
+    assert.equal(
+      (await f.actions.reconcileLocalFile(owner, proposal.id)).status,
+      "outcome_unknown",
+    );
     assert.equal(await readFile(f.target, "utf8"), oldText);
-    await assert.rejects(readFile(evidence), /ENOENT/);
+    assert.equal(await readFile(evidence, "utf8"), newText);
+    assert.equal(
+      (await f.actions.decide(owner, proposal.id, proposal.hash, "approve")).status,
+      "outcome_unknown",
+    );
+    assert.equal(await readFile(f.target, "utf8"), oldText);
+  } finally {
+    await f.close();
+  }
+});
+
+test("restoring the displaced original after exchange cannot prove non-completion", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
+  const f = await fixture();
+  try {
+    const proposal = await f.actions.propose(owner, input, "restored-original", f.task.id);
+    const evidence = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.swap`);
+    await f.db.put(owner, "tasks", { ...f.task, status: "succeeded", actionId: proposal.id });
+    await f.db.compareAndSwap(
+      owner,
+      "actions",
+      proposal.id,
+      { status: "awaiting_review" },
+      { status: "executing" },
+    );
+    assert.equal(await f.db.claimLocalFile(owner, textHash(path), proposal.id), true);
+    await executeLocalAction(f.root, input, proposal.id);
+    assert.equal(await readFile(f.target, "utf8"), newText);
+    assert.equal(await readFile(evidence, "utf8"), oldText);
+    await f.db.recoverInterruptedActions();
+    await rename(evidence, f.target);
+    assert.equal(await readFile(f.target, "utf8"), oldText);
+    assert.equal(
+      (await f.actions.reconcileLocalFile(owner, proposal.id)).status,
+      "outcome_unknown",
+    );
+    assert.deepEqual(await f.db.get(owner, "local-file-claims", textHash(path)), {
+      id: textHash(path),
+      actionId: proposal.id,
+      status: "executing",
+    });
+    assert.equal(
+      (await f.actions.decide(owner, proposal.id, proposal.hash, "approve")).status,
+      "outcome_unknown",
+    );
+    assert.equal(await readFile(f.target, "utf8"), oldText);
   } finally {
     await f.close();
   }
