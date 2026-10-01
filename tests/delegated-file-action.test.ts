@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,7 @@ import { ActionService } from "../apps/server/src/actions.ts";
 import { createStore } from "../apps/server/src/db.ts";
 import { delegatedFileProposal } from "../apps/server/src/engine/delegated-action.ts";
 import {
+  atomicExchangeAvailable,
   executeLocalAction,
   localActionEvidence,
   textHash,
@@ -20,6 +21,7 @@ const path = `${createHash("sha256").update(owner).digest("hex").slice(0, 24)}/n
 const oldText = "First line\n";
 const newText = "Reviewed replacement\n";
 const probeActionId = "a".repeat(64);
+const exchangeSupported = await atomicExchangeAvailable();
 const input: ProposalInput = {
   kind: "file.replace_text",
   data: {
@@ -127,7 +129,30 @@ test("terminal Bot block is exact, bound to its resource, and draft-only remains
   assert.equal(delegatedFileProposal(block, { ...delegation, readMode: "excerpt" }), null);
 });
 
-test("durable review denies without mutation and concurrent approval executes exact replacement once", async () => {
+test("atomic exchange capability gates preparation without changing the file", async () => {
+  const f = await fixture();
+  try {
+    if (exchangeSupported)
+      assert.equal(
+        (await f.actions.propose(owner, input, "capability", f.task.id)).status,
+        "awaiting_review",
+      );
+    else
+      await assert.rejects(
+        f.actions.propose(owner, input, "capability", f.task.id),
+        /unavailable/i,
+      );
+    assert.equal(await readFile(f.target, "utf8"), oldText);
+  } finally {
+    await f.close();
+  }
+});
+
+test("durable review denies without mutation and concurrent approval executes exact replacement once", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
   const f = await fixture();
   try {
     await assert.rejects(f.actions.propose(owner, input), /linked/i);
@@ -156,7 +181,11 @@ test("durable review denies without mutation and concurrent approval executes ex
   }
 });
 
-test("changed source, tampered review and superseded run cannot execute", async () => {
+test("changed source, tampered review and superseded run cannot execute", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
   const f = await fixture();
   try {
     const changed = await f.actions.propose(owner, input, "changed", f.task.id);
@@ -201,7 +230,11 @@ test("changed source, tampered review and superseded run cannot execute", async 
   }
 });
 
-test("pinned directory rejects symlinks and final content recheck preserves an in-place edit", async () => {
+test("pinned directory rejects symlinks and final content recheck preserves an in-place edit", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
   const f = await fixture();
   try {
     await assert.rejects(
@@ -241,7 +274,11 @@ test("pinned directory rejects symlinks and final content recheck preserves an i
   }
 });
 
-test("interrupted local write settles only from exact before or after content", async () => {
+test("interrupted local write settles only from exact before or after content", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
   const f = await fixture();
   try {
     const proposal = await f.actions.propose(owner, input, "interrupted", f.task.id);
@@ -273,9 +310,9 @@ test("interrupted local write settles only from exact before or after content", 
       ),
       /exact file evidence/i,
     );
-    const backup = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.before`);
+    const backup = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.swap`);
     await writeFile(f.target, oldText);
-    await link(f.target, backup);
+    await writeFile(backup, oldText);
     const replacement = join(f.root, path.split("/")[0], "replacement.tmp");
     await writeFile(replacement, newText);
     await rename(replacement, f.target);
@@ -290,11 +327,42 @@ test("interrupted local write settles only from exact before or after content", 
   }
 });
 
-test("edit after final read preserves displaced evidence and leaves the action uncertain", async () => {
+test("crash before exchange proves no replacement and clears staged evidence", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
+  const f = await fixture();
+  try {
+    const proposal = await f.actions.propose(owner, input, "before-exchange-crash", f.task.id);
+    const evidence = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.swap`);
+    await f.db.put(owner, "tasks", { ...f.task, status: "succeeded", actionId: proposal.id });
+    await writeFile(evidence, newText);
+    await f.db.compareAndSwap(
+      owner,
+      "actions",
+      proposal.id,
+      { status: "awaiting_review" },
+      { status: "executing" },
+    );
+    await f.db.recoverInterruptedActions();
+    assert.equal((await f.actions.reconcileLocalFile(owner, proposal.id)).status, "failed");
+    assert.equal(await readFile(f.target, "utf8"), oldText);
+    await assert.rejects(readFile(evidence), /ENOENT/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("edit after final read preserves displaced evidence and leaves the action uncertain", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
   const f = await fixture();
   try {
     const proposal = await f.actions.propose(owner, input, "post-read-edit", f.task.id);
-    const backup = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.before`);
+    const backup = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.swap`);
     await assert.rejects(
       executeLocalAction(f.root, input, proposal.id, undefined, async () => {
         await writeFile(f.target, "Concurrent edit after check\n");
@@ -321,7 +389,47 @@ test("edit after final read preserves displaced evidence and leaves the action u
   }
 });
 
-test("two distinct approved actions for one source allow exactly one replacement", async () => {
+test("atomic rename after final read is displaced into evidence before any success", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
+  const f = await fixture();
+  try {
+    const proposal = await f.actions.propose(owner, input, "post-read-rename", f.task.id);
+    const evidence = join(f.root, path.split("/")[0], `.openmuse-review-${proposal.id}.swap`);
+    const other = join(f.root, path.split("/")[0], "other.tmp");
+    await assert.rejects(
+      executeLocalAction(f.root, input, proposal.id, undefined, async () => {
+        await writeFile(other, "Unrelated atomic replacement\n");
+        await rename(other, f.target);
+      }),
+      (error: unknown) =>
+        error instanceof Error && "outcomeUnknown" in error && error.outcomeUnknown === true,
+    );
+    assert.equal(await readFile(f.target, "utf8"), newText);
+    assert.equal(await readFile(evidence, "utf8"), "Unrelated atomic replacement\n");
+    await f.db.compareAndSwap(
+      owner,
+      "actions",
+      proposal.id,
+      { status: "awaiting_review" },
+      { status: "outcome_unknown" },
+    );
+    assert.equal(
+      (await f.actions.reconcileLocalFile(owner, proposal.id)).status,
+      "outcome_unknown",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("two distinct approved actions for one source allow exactly one replacement", async (t) => {
+  if (!exchangeSupported) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
   const f = await fixture();
   try {
     const secondTask = {

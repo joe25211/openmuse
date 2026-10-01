@@ -9,7 +9,7 @@ import test from "node:test";
 import { createApp } from "../apps/server/src/app.ts";
 import type { Config } from "../apps/server/src/config.ts";
 import { createStore } from "../apps/server/src/db.ts";
-import { textHash } from "../apps/server/src/local-action.ts";
+import { atomicExchangeAvailable, textHash } from "../apps/server/src/local-action.ts";
 import { OpenBotGateway } from "../apps/server/src/openbot.ts";
 import type { AgentTask } from "../packages/domain/src/agent.ts";
 
@@ -195,6 +195,10 @@ test("warned retry is authenticated, idempotent and reserves one fresh linked at
 });
 
 test("terminal Bot proposal is prepared by server while Bot completion remains separate", async (t) => {
+  if (!(await atomicExchangeAvailable())) {
+    t.skip("Atomic exchange unavailable");
+    return;
+  }
   const f = await fixture();
   try {
     const ownerFolder = createHash("sha256").update(f.owner).digest("hex").slice(0, 24);

@@ -9,7 +9,7 @@ import {
 import type { Store } from "./db.ts";
 import { AppError } from "./errors.ts";
 import {
-  clearLocalActionBackup,
+  clearLocalActionEvidence,
   executeLocalAction,
   localActionEvidence,
   prepareLocalAction,
@@ -459,7 +459,7 @@ export class ActionService {
       { actionId: action.id, status: "executing" },
       { status: action.status },
     );
-    await clearLocalActionBackup(this.options.scopedReadRoot, input, action.id).catch(
+    await clearLocalActionEvidence(this.options.scopedReadRoot, input, action.id).catch(
       () => undefined,
     );
   }
