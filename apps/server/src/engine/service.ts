@@ -40,6 +40,7 @@ import type { Files } from "../files.ts";
 import { backgroundFailure } from "../log.ts";
 import type { OpenBotGateway } from "../openbot.ts";
 import type { WorkspaceService } from "../workspace.ts";
+import { delegatedFileProposal } from "./delegated-action.ts";
 import { analyzeSpending } from "./finance.ts";
 import { executeModelTask } from "./model.ts";
 import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
@@ -166,6 +167,11 @@ function sentContext(input: {
       : []),
     ...(input.mode === "direct" && input.resourcePath
       ? [`Resource ID: ${hash(input.resourcePath).slice(0, 16)}`]
+      : []),
+    ...(input.mode === "direct" && input.resourcePath
+      ? [
+          'For an explicitly requested actual text replacement of this named resource, you may append exactly one final fenced openmuse-action JSON block: {"kind":"file.replace_text","target":"named-resource","resourceId":"<Resource ID above>","expectedText":"<complete exact current UTF-8 text>","replacementText":"<complete replacement UTF-8 text>"}. OpenMuse verifies the current text and asks the person to review; you cannot change the file. For a draft, suggestion, unsupported action, or incomplete text, give useful copyable prose without this block.',
+        ]
       : []),
     ...(input.excerpt ? [`Included excerpt:\n${input.excerpt}`] : []),
     `Conversation ID: ${input.conversationId}`,
@@ -1626,8 +1632,42 @@ export class AgentService {
           delegation,
         };
       if (!delegation.output) await save({ output });
+      const proposal = delegatedFileProposal(output, task.prompt, delegation);
+      if (proposal && !task.actionId) {
+        const rootId = task.retryRootTaskId ?? task.id;
+        const retry = await this.db.get<DelegatedRetryReservation>(
+          owner,
+          "delegated-retries",
+          rootId,
+        );
+        if (!retry || retry.taskId === task.id) {
+          try {
+            const action = await this.actions.propose(
+              owner,
+              proposal,
+              `delegated-file:${task.id}:${delegation.runId}`,
+              task.id,
+            );
+            task = await context.checkpoint({ actionId: action.id });
+            await context.event("approval", "Exact file action ready for review", action.title);
+          } catch (error) {
+            if (error instanceof LostLeaseError) throw error;
+            await context.event(
+              "observation",
+              "Bot proposal kept as text",
+              error instanceof Error ? error.message : "The exact action could not be prepared",
+            );
+          }
+        }
+      }
       await context.event("result", "Bot answered", output);
-      return { status: "succeeded", result: output, error: null, delegation };
+      return {
+        status: "succeeded",
+        result: output,
+        error: null,
+        delegation,
+        ...(task.actionId ? { actionId: task.actionId } : {}),
+      };
     } catch (error) {
       if (error instanceof LostLeaseError) throw error;
       return pending(true);

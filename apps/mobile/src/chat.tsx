@@ -19,6 +19,7 @@ import {
   View,
 } from "react-native";
 import { z } from "zod";
+import type { Workspace } from "../../../packages/domain/src";
 import type { AgentTask, RunEvent } from "../../../packages/domain/src/agent";
 import { ArtifactCard, DelegatedRetryControl } from "./agent-ui";
 import { useAgentWorkspace } from "./agent-workspace";
@@ -992,7 +993,7 @@ function DelegatedHandoff({
   showContext: boolean;
   onToggleContext: () => void;
 }) {
-  const { open } = useWorkspace();
+  const { open, api } = useWorkspace();
   const status = delegatedTaskStatus(task);
   const result = task.delegation?.output ?? task.result;
   const preview = result?.replace(/\s+/g, " ").slice(0, 240);
@@ -1013,6 +1014,19 @@ function DelegatedHandoff({
         </Text>
       )}
       <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
+        {task.actionId && (
+          <Button
+            small
+            onPress={() => {
+              void api.request<Workspace>("/api/workspace").then((snapshot) => {
+                const action = snapshot.actions.find((item) => item.id === task.actionId);
+                if (action) open({ type: "review", action });
+              });
+            }}
+          >
+            View action review
+          </Button>
+        )}
         <Button small onPress={() => open({ type: "task", taskId: task.id })}>
           {task.status === "waiting_input" ? "Answer task question" : "Open task"}
         </Button>
@@ -1119,6 +1133,22 @@ function DelegatedTaskPane({ task }: { task: AgentTask }) {
               ? "Review task"
               : "Open task details"}
         </Button>
+        {savedTask.actionId && (
+          <Button
+            small
+            onPress={() => {
+              void api
+                .request<Workspace>("/api/workspace")
+                .then((snapshot) => {
+                  const action = snapshot.actions.find((item) => item.id === savedTask.actionId);
+                  if (action) open({ type: "review", action });
+                })
+                .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+            }}
+          >
+            View action review
+          </Button>
+        )}
         <DelegatedRetryControl key={savedTask.id} task={savedTask} />
       </Card>
       <Card style={{ gap: 8 }}>

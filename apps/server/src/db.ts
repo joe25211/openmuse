@@ -81,6 +81,8 @@ export class Store {
       `WITH source AS (
          SELECT data FROM records WHERE owner=$1 AND kind='tasks' AND id=$2
          AND data->>'status' IN ('failed','outcome_unknown')
+         AND NOT (data->>'status'='outcome_unknown'
+           AND COALESCE(data->'delegation'->>'terminal','')='finished')
          AND COALESCE(data->>'retryRootTaskId',id)=$3
          FOR UPDATE
        )
@@ -110,13 +112,41 @@ export class Store {
       `UPDATE records AS action SET data=jsonb_set(data,'{status}',$4::jsonb),updated_at=now()
        WHERE owner=$1 AND kind='actions' AND id=$2 AND data->>'status'='awaiting_review'
        AND (data->>'expiresAt')::timestamptz>$3::timestamptz
-       AND ($4::jsonb <> '"executing"'::jsonb OR data->>'taskId' IS NULL OR EXISTS (
+       AND ($4::jsonb <> '"executing"'::jsonb OR
+         (action.data->>'kind'<>'file.replace_text' AND action.data->>'taskId' IS NULL) OR EXISTS (
          SELECT 1 FROM records task WHERE task.owner=action.owner AND task.kind='tasks'
-         AND task.id=action.data->>'taskId' AND task.data->>'status' IN ('running','waiting_approval')
+         AND task.id=action.data->>'taskId' AND (
+           (action.data->>'kind'<>'file.replace_text'
+            AND task.data->>'status' IN ('running','waiting_approval')) OR
+           (action.data->>'kind'='file.replace_text' AND task.data->>'kind'='openbot'
+            AND task.data->>'status'='succeeded' AND task.data->>'actionId'=action.id
+            AND task.data->'delegation'->>'readMode'='direct'
+            AND task.data->'delegation'->>'runId'=action.data->>'sourceRunId'
+            AND task.data->'delegation'->>'resourcePath'=action.data->'data'->>'path'
+            AND NOT EXISTS (
+              SELECT 1 FROM records retry WHERE retry.owner=task.owner AND retry.kind='delegated-retries'
+              AND retry.id=COALESCE(task.data->>'retryRootTaskId',task.id)
+              AND retry.data->>'taskId'<>task.id
+            ))
+         )
        )) RETURNING data`,
       [owner, id, now, JSON.stringify(status)],
     );
     return (result.rows[0]?.data as T | undefined) ?? null;
+  }
+  async claimLocalFile(owner: string, resourceId: string, actionId: string): Promise<boolean> {
+    const value = { id: resourceId, actionId, status: "executing" };
+    const result = await this.db.query(
+      `INSERT INTO records(owner,kind,id,data)
+       SELECT $1,'local-file-claims',$2,$4::jsonb
+       WHERE EXISTS (SELECT 1 FROM records action WHERE action.owner=$1 AND action.kind='actions'
+         AND action.id=$3 AND action.data->>'status'='executing')
+       ON CONFLICT(owner,kind,id) DO UPDATE SET data=excluded.data,updated_at=now()
+       WHERE records.data->>'status' <> 'executing'
+       RETURNING data`,
+      [owner, resourceId, actionId, JSON.stringify(value)],
+    );
+    return result.rows.length === 1;
   }
   async recoverInterruptedActions(): Promise<void> {
     await this.db.query(

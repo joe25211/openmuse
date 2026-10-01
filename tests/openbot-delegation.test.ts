@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import test from "node:test";
 import { createApp } from "../apps/server/src/app.ts";
 import type { Config } from "../apps/server/src/config.ts";
 import { createStore } from "../apps/server/src/db.ts";
+import { textHash } from "../apps/server/src/local-action.ts";
 import { OpenBotGateway } from "../apps/server/src/openbot.ts";
 import type { AgentTask } from "../packages/domain/src/agent.ts";
 
@@ -188,6 +189,74 @@ test("warned retry is authenticated, idempotent and reserves one fresh linked at
       (await f.db.get<AgentTask>(f.owner, "tasks", next.id))?.delegation?.threadId,
       "thread-2",
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test("terminal Bot proposal is prepared by server while Bot completion remains separate", async (t) => {
+  const f = await fixture();
+  try {
+    const ownerFolder = createHash("sha256").update(f.owner).digest("hex").slice(0, 24);
+    await mkdir(join(f.directory, ownerFolder), { recursive: true });
+    const file = join(f.directory, ownerFolder, "review.txt");
+    await writeFile(file, "Original\n");
+    const response = await f.request("conversation-1", {
+      requestId: "reviewed-file",
+      botId: "bot-1",
+      sourcePath: "review.txt",
+      prompt: "Replace Original in the named file with Reviewed",
+    });
+    assert.equal(response.status, 201);
+    const task = (await response.json()) as AgentTask;
+    assert(task.delegation?.resourcePath);
+    await f.db.put(f.owner, "tasks", {
+      ...task,
+      delegation: {
+        ...task.delegation,
+        readMode: "direct",
+        channelAttempted: true,
+        threadId: "thread-1",
+        submissionAttempted: true,
+        terminal: "finished",
+        messageIds: ["answer-1"],
+      },
+    });
+    const gateway = f.server.agent.openbot;
+    assert(gateway);
+    const output = `Prepared exact edit.\n\x60\x60\x60openmuse-action\n${JSON.stringify({
+      kind: "file.replace_text",
+      target: "named-resource",
+      resourceId: textHash(task.delegation.resourcePath).slice(0, 16),
+      expectedText: "Original\n",
+      replacementText: "Reviewed\n",
+    })}\n\x60\x60\x60`;
+    t.mock.method(gateway, "textResult", async () => output);
+    await f.server.agent.worker.tick();
+    const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
+    assert.equal(saved?.status, "succeeded");
+    assert.equal(saved.result, output);
+    assert(saved.actionId);
+    const action = await f.db.get<{
+      id: string;
+      hash: string;
+      status: string;
+      taskId: string;
+      sourceRunId: string;
+    }>(f.owner, "actions", saved.actionId);
+    assert.equal(action?.status, "awaiting_review");
+    assert.equal(action.taskId, task.id);
+    assert.equal(action.sourceRunId, task.delegation.runId);
+    assert.equal(await readFile(file, "utf8"), "Original\n");
+    const approved = await f.server.app.request(`/api/actions/${action.id}/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${f.token}` },
+      body: JSON.stringify({ hash: action.hash, decision: "approve" }),
+    });
+    assert.equal(approved.status, 200);
+    assert.equal((await approved.json()).status, "succeeded");
+    assert.equal(await readFile(file, "utf8"), "Reviewed\n");
+    assert.equal((await f.db.get<AgentTask>(f.owner, "tasks", task.id))?.status, "succeeded");
   } finally {
     await f.close();
   }

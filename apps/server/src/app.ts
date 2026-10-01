@@ -45,7 +45,14 @@ export async function createApp(
       connection: (owner, input) => composio.connection(owner, input),
       execute: (owner, input, connectionId) => composio.execute(owner, input, connectionId),
     },
+    scopedReadRoot: config.openbotScopedReadRoot,
   });
+  for (const { owner, value } of await db.scan<{ id: string; kind: string; status: string }>(
+    "actions",
+  ))
+    if (value.kind === "file.replace_text" && value.status === "outcome_unknown")
+      await actions.reconcileLocalFile(owner, value.id);
+  await actions.recoverLocalClaims();
   const browser = new BrowserService(db, config, auth, files);
   const computer = new ComputerService(db, config, options.docker);
   const intelligence = new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
@@ -304,6 +311,9 @@ export async function createApp(
       ),
     );
   });
+  app.post("/api/actions/:id/verify-file", async (c) =>
+    c.json(await actions.reconcileLocalFile(c.get("owner"), c.req.param("id"))),
+  );
   app.get("/api/drafts", async (c) => c.json(await db.list(c.get("owner"), "drafts")));
   app.post("/api/drafts", async (c) => {
     const body = emailDraftSchema.extend({ id: z.string().optional() }).parse(await c.req.json());

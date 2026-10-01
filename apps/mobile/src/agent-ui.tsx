@@ -566,15 +566,19 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               )}
             </Card>
           )}
-          {task.status === "waiting_approval" && !uncertainAction && (
-            <Card style={{ backgroundColor: colors.lavender, gap: 12 }}>
-              <Text style={s.heading}>Ready for your review</Text>
-              <Text style={s.muted}>Review the exact action and account before it proceeds.</Text>
-              <Button primary busy={busy} onPress={() => void review()}>
-                Review action
-              </Button>
-            </Card>
-          )}
+          {(task.status === "waiting_approval" ||
+            (task.delegation &&
+              linkedAction?.kind === "file.replace_text" &&
+              linkedAction.status === "awaiting_review")) &&
+            !uncertainAction && (
+              <Card style={{ backgroundColor: colors.lavender, gap: 12 }}>
+                <Text style={s.heading}>Ready for your review</Text>
+                <Text style={s.muted}>Review the exact action before it proceeds.</Text>
+                <Button primary busy={busy} onPress={() => void review()}>
+                  Review action
+                </Button>
+              </Card>
+            )}
           {task.status === "waiting_input" && (
             <Card style={{ backgroundColor: colors.sky, gap: 10 }}>
               <Text style={s.heading}>{task.question || "A detail from you will help"}</Text>
