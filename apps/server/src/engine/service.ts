@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { CopilotKitIntelligence } from "@copilotkit/runtime/v2";
 import { z } from "zod";
 import type { OpenBotRunObservation } from "../../../../packages/backends/src/openbot.ts";
@@ -1631,13 +1632,33 @@ export class AgentService {
     if (delegation.terminal === "error")
       return { status: "failed", error: "The linked OpenBot run reported an error", delegation };
     try {
-      const output =
-        delegation.output ||
-        (await gateway.textResult(
-          delegation.botId,
-          delegation.threadId,
-          delegation.messageIds ?? [],
-        ));
+      let output = delegation.output;
+      if (!output && delegation.replacementIntent === "reviewed_replace_text") {
+        // OpenBot's history can briefly contain a partial assistant message after RUN_FINISHED.
+        // Do not freeze that first snapshot as the text or as an executable proposal.
+        let previous = "";
+        let stableReads = 0;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const current = await gateway.textResult(
+            delegation.botId,
+            delegation.threadId,
+            delegation.messageIds ?? [],
+          );
+          stableReads = current && current === previous ? stableReads + 1 : current ? 1 : 0;
+          if (stableReads >= 3) {
+            output = current;
+            break;
+          }
+          previous = current;
+          if (attempt < 7) await delay(500, undefined, { signal: context.signal });
+        }
+        if (!output) return pending(false);
+      }
+      output ??= await gateway.textResult(
+        delegation.botId,
+        delegation.threadId,
+        delegation.messageIds ?? [],
+      );
       if (!output)
         return {
           status: "failed",

@@ -248,11 +248,15 @@ test("terminal Bot proposal is prepared by server while Bot completion remains s
       expectedText: "Original\n",
       replacementText: "Reviewed\n",
     })}\n\x60\x60\x60`;
-    t.mock.method(gateway, "textResult", async () => output);
+    let historyReads = 0;
+    t.mock.method(gateway, "textResult", async () =>
+      ++historyReads <= 2 ? output.slice(0, 16) : output,
+    );
     await f.server.agent.worker.tick();
     const saved = await f.db.get<AgentTask>(f.owner, "tasks", task.id);
     assert.equal(saved?.status, "succeeded");
     assert.equal(saved.result, output);
+    assert(historyReads >= 5, "reviewed output must settle after partial history snapshots");
     assert(saved.actionId);
     const action = await f.db.get<{
       id: string;
