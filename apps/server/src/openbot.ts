@@ -1,5 +1,10 @@
+import { createHmac } from "node:crypto";
 import { z } from "zod";
-import { OpenBotAdapter, OpenBotError } from "../../../packages/backends/src/openbot.ts";
+import {
+  OpenBotAdapter,
+  OpenBotError,
+  type OpenBotRunObservation,
+} from "../../../packages/backends/src/openbot.ts";
 import type { Config } from "./config.ts";
 import { AppError } from "./errors.ts";
 
@@ -10,6 +15,7 @@ const agentsSchema = z.object({
       name: z.string().min(1),
       title: z.string().optional(),
       hidden: z.boolean().optional(),
+      endpoint: z.string().nullable().optional(),
     }),
   ),
 });
@@ -28,9 +34,13 @@ const channelsSchema = z.object({
 export class OpenBotGateway {
   private readonly base?: URL;
   private readonly adapter: OpenBotAdapter;
+  private readonly scopedReadToken?: string;
+  private readonly scopedReadSigningKey?: string;
   private probeCache?: { expiresAt: number; result: ReturnType<OpenBotAdapter["probe"]> };
 
   constructor(config: Config) {
+    this.scopedReadToken = config.openbotScopedReadToken?.trim();
+    this.scopedReadSigningKey = config.openbotScopedReadSigningKey?.trim();
     if (config.openbotEnabled) {
       if (!config.openbotBaseUrl) throw new Error("OPENBOT_BASE_URL is required when enabled");
       const base = new URL(config.openbotBaseUrl);
@@ -51,7 +61,8 @@ export class OpenBotGateway {
       enabled: config.openbotEnabled,
       transport: base
         ? {
-            runtimeUrl: `${config.publicUrl}/api/openbot/copilotkit`,
+            runtimeUrl: new URL("/api/copilotkit", base).toString(),
+            socketUrl: new URL("/socket", base).toString().replace(/^http/, "ws"),
             request: (path, init) => fetch(new URL(path, base), { ...init, redirect: "error" }),
           }
         : undefined,
@@ -72,6 +83,108 @@ export class OpenBotGateway {
   async agents() {
     const { agents } = await this.json("/api/agents", agentsSchema);
     return { agents: agents.filter((agent) => !agent.hidden) };
+  }
+
+  async eligibleBot(botId: string) {
+    const matches = (await this.agents()).agents.filter(
+      (agent) => agent.id === botId || agent.name.toLowerCase() === botId.toLowerCase(),
+    );
+    const bot = matches.length === 1 ? matches[0] : undefined;
+    if (!bot) throw new AppError("The named Bot is unavailable or ambiguous", 404);
+    if (bot.endpoint !== null)
+      throw new AppError("The named Bot's external endpoint cannot be verified as tool-free", 409);
+    try {
+      if (!(await this.adapter.hasNoEffectiveGrants(bot.id)))
+        throw new AppError(
+          "The named Bot has tool or host access and cannot take a text-only task",
+          409,
+        );
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError("The named Bot's effective authority could not be verified", 502);
+    }
+    return bot;
+  }
+
+  createTaskChannel(botId: string) {
+    return this.adapter.createConversation(botId, AbortSignal.timeout(10000));
+  }
+
+  async bindScopedRead(
+    owner: string,
+    taskId: string,
+    botId: string,
+    threadId: string,
+    runId: string,
+    path: string,
+  ) {
+    if (
+      !this.scopedReadToken ||
+      !this.scopedReadSigningKey ||
+      this.scopedReadSigningKey.length < 32 ||
+      this.scopedReadSigningKey === this.scopedReadToken
+    )
+      throw new AppError("Scoped reads are unavailable", 503);
+    const tuple = JSON.stringify([owner, taskId, botId, threadId, runId, path]);
+    const runSecret = createHmac("sha256", this.scopedReadSigningKey)
+      .update(`run:${tuple}`)
+      .digest("base64url");
+    const signature = createHmac("sha256", this.scopedReadSigningKey)
+      .update(tuple)
+      .digest("base64url");
+    const response = await fetch(new URL("/api/openmuse/scoped-runs", this.requireBase()), {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.scopedReadToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ owner, taskId, botId, threadId, runId, path, runSecret, signature }),
+      redirect: "error",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) throw new AppError("Scoped reads are unavailable", 503);
+    return runSecret;
+  }
+
+  runText(
+    botId: string,
+    threadId: string,
+    runId: string,
+    text: string,
+    onStartup: () => Promise<void>,
+    signal: AbortSignal,
+    onEvent?: (event: OpenBotRunObservation) => Promise<void>,
+    scopeSecret?: string,
+  ) {
+    return this.adapter.runText(
+      botId,
+      threadId,
+      runId,
+      text,
+      onStartup,
+      signal,
+      onEvent,
+      scopeSecret,
+    );
+  }
+
+  reconnectRun(
+    botId: string,
+    threadId: string,
+    runId: string,
+    cursor: string | undefined,
+    onEvent: (event: OpenBotRunObservation) => Promise<void>,
+    signal: AbortSignal,
+  ) {
+    return this.adapter.reconnectRun(botId, threadId, runId, cursor, onEvent, signal);
+  }
+
+  stopRun(botId: string, threadId: string, runId: string) {
+    return this.adapter.stopRun(botId, threadId, runId);
+  }
+
+  textResult(botId: string, threadId: string, messageIds: string[]) {
+    return this.adapter.textResult(botId, threadId, messageIds);
   }
 
   channels(cursor?: string) {

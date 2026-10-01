@@ -1,3 +1,4 @@
+import { fetch } from "expo/fetch";
 import { Platform } from "react-native";
 
 export const API_URL = (

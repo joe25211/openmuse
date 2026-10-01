@@ -9,7 +9,41 @@ export type TaskStatus =
   | "paused"
   | "succeeded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "outcome_unknown";
+export interface TaskDelegation {
+  conversationId: string;
+  requestId: string;
+  botId: string;
+  botName: string;
+  brief?: string;
+  sentContext: string;
+  sourcePath?: string;
+  resourcePath?: string;
+  replacementIntent?: "reviewed_replace_text";
+  fallbackExcerpt?: string;
+  readMode?: "direct" | "excerpt" | "supplied";
+  runId: string;
+  channelAttempted: boolean;
+  channelId?: string;
+  threadId?: string;
+  submissionAttempted: boolean;
+  startupAcknowledged?: boolean;
+  lastProgressAt?: string;
+  lastProgress?: string;
+  replayCursor?: string;
+  transportLostAt?: string;
+  delayedAt?: string;
+  terminal?: "finished" | "error";
+  messageIds?: string[];
+  output?: string;
+  stop?: "pending" | "unconfirmed" | "confirmed";
+  stopAttemptedAt?: string;
+  stoppedAt?: string;
+  stopReconciledAt?: string;
+  lateOutput?: string;
+  lateOutputAt?: string;
+}
 export interface Evidence {
   id: string;
   kind: "mail" | "file" | "web" | "user";
@@ -25,9 +59,13 @@ export interface TaskStep {
 }
 export interface AgentTask {
   id: string;
+  retryOfTaskId?: string;
+  retryRootTaskId?: string;
+  retryKey?: string;
   title: string;
   prompt: string;
-  kind: "agent" | "document" | "monitor" | "finance" | "plan";
+  kind: "agent" | "document" | "monitor" | "finance" | "plan" | "openbot";
+  delegation?: TaskDelegation;
   status: TaskStatus;
   goalId?: string;
   plan: TaskStep[];

@@ -8,8 +8,34 @@ import {
 } from "../../../packages/domain/src/index.ts";
 import type { Store } from "./db.ts";
 import { AppError } from "./errors.ts";
+import {
+  clearLocalActionEvidence,
+  executeLocalAction,
+  localActionEvidence,
+  prepareLocalAction,
+} from "./local-action.ts";
 
 type ComposioAction = Extract<ProposalInput, { kind: "composio.execute" }>;
+function proposalHash(
+  input: ProposalInput,
+  connection: unknown,
+  target: unknown,
+  targetVersion: string | undefined,
+  taskId?: string,
+  sourceRunId?: string,
+) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        input,
+        connection,
+        target,
+        targetVersion,
+        ...(input.kind === "file.replace_text" ? { taskId, sourceRunId } : {}),
+      }),
+    )
+    .digest("hex");
+}
 interface Options {
   execute: (
     owner: string,
@@ -33,6 +59,7 @@ interface Options {
     execute: (owner: string, input: ComposioAction, connectionId?: string) => Promise<string>;
   };
   now?: () => number;
+  scopedReadRoot?: string;
 }
 export class ActionService {
   private readonly now: () => number;
@@ -57,29 +84,54 @@ export class ActionService {
       if (existing) return existing;
     }
     const parsed = proposalSchema.parse(raw);
+    const local = parsed.kind === "file.replace_text";
+    let localTask: AgentTask | null = null;
+    if (local) {
+      const task = taskId ? await this.db.get<AgentTask>(owner, "tasks", taskId) : null;
+      if (
+        task?.delegation?.replacementIntent !== "reviewed_replace_text" ||
+        task.delegation.resourcePath !== parsed.data.path ||
+        task.delegation.readMode !== "direct" ||
+        !["running", "outcome_unknown"].includes(task.status)
+      )
+        throw new AppError("This named file is not linked to an active delegated task", 409);
+      const retry = await this.db.get<{ taskId: string }>(
+        owner,
+        "delegated-retries",
+        task.retryRootTaskId ?? task.id,
+      );
+      if (retry && retry.taskId !== task.id)
+        throw new AppError("The original Bot attempt was superseded by a retry", 409);
+      localTask = task;
+      await prepareLocalAction(this.options.scopedReadRoot, parsed);
+    }
     const composio = parsed.kind === "composio.execute";
-    const connection = composio
-      ? await this.options.composio?.connection(owner, parsed)
-      : await this.options.connection?.(owner);
-    if (composio && !this.options.composio) throw new AppError("Composio is not configured", 503);
-    if (!composio && this.options.connection && !connection)
-      throw new AppError("Connect Google before preparing an action", 409);
-    const prepared = composio
+    const connection = local
       ? undefined
-      : await this.options.prepare?.(owner, parsed, connection?.id);
+      : composio
+        ? await this.options.composio?.connection(owner, parsed)
+        : await this.options.connection?.(owner);
+    if (composio && !this.options.composio) throw new AppError("Composio is not configured", 503);
+    if (!composio && !local && this.options.connection && !connection)
+      throw new AppError("Connect Google before preparing an action", 409);
+    const prepared =
+      composio || local ? undefined : await this.options.prepare?.(owner, parsed, connection?.id);
     const input = proposalSchema.parse(prepared?.input ?? parsed);
     const title =
-      input.kind === "composio.execute"
-        ? `Run ${input.data.tool} in ${input.data.toolkit}`
-        : input.kind === "email.send"
-          ? `Send “${input.data.subject}”`
-          : input.kind === "calendar.delete"
-            ? `Delete ${input.data.title}`
-            : `${input.kind === "calendar.create" ? "Create" : "Update"} ${input.data.title}`;
+      input.kind === "file.replace_text"
+        ? `Replace text in ${input.data.path.split("/").at(-1)}`
+        : input.kind === "composio.execute"
+          ? `Run ${input.data.tool} in ${input.data.toolkit}`
+          : input.kind === "email.send"
+            ? `Send “${input.data.subject}”`
+            : input.kind === "calendar.delete"
+              ? `Delete ${input.data.title}`
+              : `${input.kind === "calendar.create" ? "Create" : "Update"} ${input.data.title}`;
     const createdAt = new Date(this.now()).toISOString();
     const proposal: ActionProposal = {
       id,
       taskId,
+      sourceRunId: localTask?.delegation?.runId,
       title,
       kind: input.kind,
       data: input.data,
@@ -88,16 +140,14 @@ export class ActionService {
       target: prepared?.target,
       targetVersion: prepared?.targetVersion,
       status: "awaiting_review",
-      hash: createHash("sha256")
-        .update(
-          JSON.stringify({
-            input,
-            connection,
-            target: prepared?.target,
-            targetVersion: prepared?.targetVersion,
-          }),
-        )
-        .digest("hex"),
+      hash: proposalHash(
+        input,
+        connection,
+        prepared?.target,
+        prepared?.targetVersion,
+        taskId,
+        localTask?.delegation?.runId,
+      ),
       createdAt,
       expiresAt: new Date(this.now() + 30 * 60 * 1000).toISOString(),
     };
@@ -123,10 +173,38 @@ export class ActionService {
     if (!proposal) throw new AppError("Action not found", 404);
     if (proposal.hash !== hash)
       throw new AppError("This proposal changed. Open its latest review before deciding.", 409);
+    if (proposal.kind === "file.replace_text") {
+      const checked = proposalSchema.parse({ kind: proposal.kind, data: proposal.data });
+      if (
+        proposalHash(
+          checked,
+          undefined,
+          undefined,
+          undefined,
+          proposal.taskId,
+          proposal.sourceRunId,
+        ) !== proposal.hash
+      )
+        throw new AppError("The exact file proposal changed. Prepare a fresh review.", 409);
+    }
     if (proposal.status !== "awaiting_review") return proposal;
+    if (decision === "approve" && proposal.kind === "file.replace_text" && !proposal.taskId)
+      throw new AppError("The file review has no linked task", 409);
     if (decision === "approve" && proposal.taskId) {
-      const task = await this.db.get<{ status: string }>(owner, "tasks", proposal.taskId);
-      if (!task || !["running", "waiting_approval"].includes(task.status))
+      const task = await this.db.get<AgentTask>(owner, "tasks", proposal.taskId);
+      if (
+        !task ||
+        (proposal.kind === "file.replace_text" &&
+          (task.kind !== "openbot" ||
+            task.actionId !== proposal.id ||
+            task.delegation?.readMode !== "direct" ||
+            task.delegation?.replacementIntent !== "reviewed_replace_text" ||
+            task.delegation?.resourcePath !== proposal.data.path ||
+            task.delegation?.runId !== proposal.sourceRunId)) ||
+        (proposal.kind === "file.replace_text"
+          ? task.status !== "succeeded"
+          : !["running", "waiting_approval"].includes(task.status))
+      )
         throw new AppError(
           "Resume the task before approving this action. Cancelled tasks cannot execute.",
           409,
@@ -151,10 +229,15 @@ export class ActionService {
     if (
       decision === "approve" &&
       input.kind !== "composio.execute" &&
+      input.kind !== "file.replace_text" &&
       !(await this.options.connected(owner))
     )
       throw new AppError("Google is disconnected. Reconnect before approving this action.", 409);
-    if (decision === "approve" && (input.kind === "composio.execute" || this.options.connection)) {
+    if (
+      decision === "approve" &&
+      (input.kind === "composio.execute" ||
+        (input.kind !== "file.replace_text" && this.options.connection))
+    ) {
       const connection =
         input.kind === "composio.execute"
           ? await this.options.composio?.connection(owner, input)
@@ -187,6 +270,15 @@ export class ActionService {
     if (!claimed) {
       const current = await this.db.get<ActionProposal>(owner, "actions", id);
       if (!current) throw new AppError("Action not found", 404);
+      if (
+        decision === "approve" &&
+        current.kind === "file.replace_text" &&
+        current.status === "awaiting_review"
+      )
+        throw new AppError(
+          "The linked Bot attempt changed. Refresh its task before approving.",
+          409,
+        );
       return current;
     }
     await this.record(
@@ -198,7 +290,11 @@ export class ActionService {
     let finished: ActionProposal;
     try {
       let result: string;
-      if (input.kind === "composio.execute") {
+      if (input.kind === "file.replace_text") {
+        if (!(await this.db.claimLocalFile(owner, this.localClaimId(input.data.path), claimed.id)))
+          throw new AppError("Another reviewed action is changing this named file", 409);
+        result = await executeLocalAction(this.options.scopedReadRoot, input, claimed.id);
+      } else if (input.kind === "composio.execute") {
         if (!this.options.composio) throw new AppError("Composio is not configured", 503);
         result = await this.options.composio.execute(owner, input, claimed.connectionId);
       } else
@@ -234,10 +330,14 @@ export class ActionService {
     if (!saved) {
       const current = await this.db.get<ActionProposal>(owner, "actions", id);
       if (!current) throw new AppError("Action not found", 404);
+      if (current.kind === "file.replace_text") await this.settleLocalClaim(owner, current);
       return current;
     }
+    if (saved.kind === "file.replace_text") await this.settleLocalClaim(owner, saved);
     await this.record(owner, saved, saved.result ?? saved.error ?? saved.status);
-    return saved;
+    return saved.kind === "file.replace_text" && saved.status === "outcome_unknown"
+      ? this.reconcileLocalFile(owner, saved.id)
+      : saved;
   }
   async reconcile(
     owner: string,
@@ -251,6 +351,8 @@ export class ActionService {
       throw new AppError("Describe what you verified in 8 to 1000 characters", 422);
     const action = await this.db.get<ActionProposal>(owner, "actions", id);
     if (!action) throw new AppError("Action not found", 404);
+    if (action.kind === "file.replace_text")
+      throw new AppError("Local file actions require exact file evidence", 409);
     if (action.hash !== hash)
       throw new AppError("This proposal changed. Open its latest review before deciding.", 409);
     const confirmedAt = new Date(this.now()).toISOString();
@@ -288,6 +390,78 @@ export class ActionService {
         `You confirmed ${completed ? "completed" : "not completed"}: ${verifiedNote}`,
       );
     return resolved;
+  }
+  async reconcileLocalFile(owner: string, id: string): Promise<ActionProposal> {
+    const action = await this.db.get<ActionProposal>(owner, "actions", id);
+    if (!action) throw new AppError("Action not found", 404);
+    if (action.kind !== "file.replace_text" || action.status !== "outcome_unknown") return action;
+    const input = proposalSchema.parse({ kind: action.kind, data: action.data });
+    if (input.kind !== "file.replace_text") return action;
+    if (
+      proposalHash(input, undefined, undefined, undefined, action.taskId, action.sourceRunId) !==
+      action.hash
+    )
+      return action;
+    const outcome = await localActionEvidence(this.options.scopedReadRoot, input, action.id);
+    if (outcome === "unknown") return action;
+    const resolved = await this.db.compareAndSwap<ActionProposal>(
+      owner,
+      "actions",
+      id,
+      { status: "outcome_unknown", hash: action.hash },
+      {
+        status: outcome === "completed" ? "succeeded" : "failed",
+        result: outcome === "completed" ? "Exact replacement content verified on disk" : null,
+        error:
+          outcome === "completed"
+            ? null
+            : "Original file content verified; the replacement did not complete.",
+        reconciliation: {
+          outcome,
+          note: "Exact local file content hash verified",
+          confirmedAt: new Date(this.now()).toISOString(),
+        },
+      },
+    );
+    if (!resolved) return (await this.db.get<ActionProposal>(owner, "actions", id)) ?? action;
+    await this.settleLocalClaim(owner, resolved);
+    await this.record(owner, resolved, resolved.result ?? resolved.error ?? resolved.status);
+    return resolved;
+  }
+  async recoverLocalClaims(): Promise<void> {
+    for (const { owner, value } of await this.db.scan<{ id: string; actionId: string }>(
+      "local-file-claims",
+    )) {
+      const action = await this.db.get<ActionProposal>(owner, "actions", value.actionId);
+      if (action?.kind !== "file.replace_text") continue;
+      const settled =
+        action.status === "outcome_unknown"
+          ? await this.reconcileLocalFile(owner, action.id)
+          : action;
+      await this.settleLocalClaim(owner, settled);
+    }
+  }
+  private localClaimId(path: string) {
+    return createHash("sha256").update(path).digest("hex");
+  }
+  private async settleLocalClaim(owner: string, action: ActionProposal) {
+    if (
+      action.kind !== "file.replace_text" ||
+      ["executing", "outcome_unknown", "awaiting_review"].includes(action.status)
+    )
+      return;
+    const input = proposalSchema.parse({ kind: action.kind, data: action.data });
+    if (input.kind !== "file.replace_text") return;
+    await this.db.compareAndSwap(
+      owner,
+      "local-file-claims",
+      this.localClaimId(input.data.path),
+      { actionId: action.id, status: "executing" },
+      { status: action.status },
+    );
+    await clearLocalActionEvidence(this.options.scopedReadRoot, input, action.id).catch(
+      () => undefined,
+    );
   }
   async syncReconciledTask(owner: string, action: ActionProposal): Promise<void> {
     if (!action.taskId || !action.reconciliation) return;

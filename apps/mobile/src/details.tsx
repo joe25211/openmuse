@@ -576,6 +576,20 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
       setBusy(false);
     }
   }
+  async function verifyFile() {
+    setBusy(true);
+    setError("");
+    try {
+      setLocal(
+        await api.request<ActionProposal>(`/api/actions/${action.id}/verify-file`, {}, "POST"),
+      );
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function edit() {
     setBusy(true);
     setError("");
@@ -606,13 +620,16 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
   }
   const email = action.kind === "email.send";
   const composio = action.kind === "composio.execute";
+  const localFile = action.kind === "file.replace_text";
   return (
     <Sheet
       title={pending ? "One last look" : action.title}
       subtitle={
-        w.mode === "sample" && !composio
-          ? "This action stays in your local workspace."
-          : "Review this exact action before it changes your connected account."
+        localFile
+          ? "Review this exact replacement before OpenMuse changes the named local file."
+          : w.mode === "sample" && !composio
+            ? "This action stays in your local workspace."
+            : "Review this exact action before it changes your connected account."
       }
       onClose={close}
     >
@@ -629,8 +646,21 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
         </Chip>
       </View>
       <Card style={{ gap: 13 }}>
-        <ReviewLine label="Account" value={action.account || w.profile.email} />
-        {composio ? (
+        <ReviewLine
+          label={localFile ? "Resource" : "Account"}
+          value={localFile ? "Named local file" : action.account || w.profile.email}
+        />
+        {localFile ? (
+          <>
+            <ReviewLine label="Exact target" value={String(d.path || "")} />
+            <ReviewLine label="Expected current SHA-256" value={String(d.expectedSha256 || "")} />
+            <View style={s.divider} />
+            <Text style={s.label}>Complete replacement text</Text>
+            <Text selectable style={s.text}>
+              {String(d.replacementText ?? "")}
+            </Text>
+          </>
+        ) : composio ? (
           <>
             <ReviewLine label="App" value={String(d.toolkit || "")} />
             <ReviewLine label="Action" value={String(d.tool || "")} />
@@ -703,7 +733,19 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
         )}
       </Card>
       <ErrorNotice error={error || action.error || ""} />
-      {action.status === "outcome_unknown" && (
+      {action.status === "outcome_unknown" && localFile && (
+        <Card style={{ gap: 13, marginTop: 16 }}>
+          <Text style={s.heading}>File outcome unknown</Text>
+          <Text style={s.text}>
+            OpenMuse checks the file and any preserved displaced content before settling this
+            action. It will not repeat the write.
+          </Text>
+          <Button small busy={busy} onPress={() => void verifyFile()}>
+            Check file content
+          </Button>
+        </Card>
+      )}
+      {action.status === "outcome_unknown" && !localFile && (
         <Card style={{ gap: 13, marginTop: 16 }}>
           <Text style={s.heading}>Check the connected app</Text>
           <Text style={s.text}>
@@ -776,15 +818,17 @@ function ReviewDetail({ initial }: { initial: ActionProposal }) {
           </Text>
           <View style={[s.row, { gap: 10, flexWrap: "wrap" }]}>
             <Button primary icon={Check} busy={busy} onPress={() => void decide("approve")}>
-              {composio
-                ? "Approve app action"
-                : w.mode === "sample"
-                  ? "Approve locally"
-                  : email
-                    ? "Approve & send"
-                    : "Approve change"}
+              {localFile
+                ? "Approve replacement"
+                : composio
+                  ? "Approve app action"
+                  : w.mode === "sample"
+                    ? "Approve locally"
+                    : email
+                      ? "Approve & send"
+                      : "Approve change"}
             </Button>
-            {!composio && action.kind !== "calendar.delete" && (
+            {!composio && !localFile && action.kind !== "calendar.delete" && (
               <Button icon={Edit3} disabled={busy} onPress={() => void edit()}>
                 Edit details
               </Button>

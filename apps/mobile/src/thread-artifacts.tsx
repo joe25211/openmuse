@@ -5,6 +5,7 @@ import type { Artifact, BrowserSession } from "../../../packages/domain/src";
 import type { AgentArtifact, AgentTask } from "../../../packages/domain/src/agent";
 import { ArtifactCard, TaskCard } from "./agent-ui";
 import { BrowserThreadCard } from "./computer";
+import { freshestTask } from "./delegated-chat";
 import { Button, Card, colors, ErrorNotice, s } from "./ui";
 import { useWorkspace } from "./workspace";
 
@@ -63,6 +64,7 @@ export function FileThreadCard({ file }: { file: Artifact }) {
 export function TaskThreadCard({ task }: { task: AgentTask }) {
   const { api } = useWorkspace();
   const [detail, setDetail] = useState<{
+    task: AgentTask;
     artifacts: AgentArtifact[];
     files: Artifact[];
     browsers: BrowserSession[];
@@ -72,9 +74,12 @@ export function TaskThreadCard({ task }: { task: AgentTask }) {
   useEffect(() => {
     let active = true;
     void api
-      .request<{ artifacts: AgentArtifact[]; files: Artifact[]; browsers: BrowserSession[] }>(
-        `/api/agent/tasks/${task.id}`,
-      )
+      .request<{
+        task: AgentTask;
+        artifacts: AgentArtifact[];
+        files: Artifact[];
+        browsers: BrowserSession[];
+      }>(`/api/agent/tasks/${task.id}`)
       .then((result) => {
         if (active) {
           setDetail(result);
@@ -88,19 +93,21 @@ export function TaskThreadCard({ task }: { task: AgentTask }) {
       active = false;
     };
   }, [api, task.id, task.updatedAt, attempt]);
+  const currentDetail = detail?.task.id === task.id ? detail : undefined;
+  const savedTask = freshestTask(task, currentDetail?.task);
   return (
     <View style={{ gap: 12 }}>
-      <TaskCard task={task} compact />
-      {detail?.browsers.map((browser) => (
+      <TaskCard task={savedTask} compact />
+      {currentDetail?.browsers.map((browser) => (
         <BrowserThreadCard key={browser.id} browser={browser} />
       ))}
-      {[...(detail?.files || [])]
+      {[...(currentDetail?.files || [])]
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
         .slice(0, 1)
         .map((file) => (
           <FileThreadCard key={file.id} file={file} />
         ))}
-      {detail?.artifacts.map((artifact) => (
+      {currentDetail?.artifacts.map((artifact) => (
         <ArtifactCard key={artifact.id} artifact={artifact} />
       ))}
       <ErrorNotice error={error} />

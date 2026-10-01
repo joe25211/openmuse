@@ -116,6 +116,21 @@ export const eventDraftSchema = z
     }
   });
 export const proposalSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("file.replace_text"),
+    data: z
+      .object({
+        path: z.string().min(1).max(1024),
+        expectedSha256: z.string().regex(/^[a-f0-9]{64}$/),
+        replacementText: z
+          .string()
+          .refine(
+            (value) => new TextEncoder().encode(value).length <= 64 * 1024,
+            "Replacement text must be at most 64 KiB of UTF-8",
+          ),
+      })
+      .strict(),
+  }),
   z.object({ kind: z.literal("email.send"), data: emailDraftSchema }),
   z.object({ kind: z.literal("calendar.create"), data: eventDraftSchema }),
   z.object({
@@ -156,6 +171,7 @@ export interface ActionProposal {
   target?: CalendarEvent;
   targetVersion?: string;
   taskId?: string;
+  sourceRunId?: string;
   account?: string;
   connectionId?: string;
   id: string;

@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import type { CopilotKitIntelligence } from "@copilotkit/runtime/v2";
 import { z } from "zod";
+import type { OpenBotRunObservation } from "../../../../packages/backends/src/openbot.ts";
 import {
   type AgentArtifact,
   type AgentIdentity,
@@ -15,6 +21,7 @@ import {
   type Monitor,
   monitorInputSchema,
   type RunEvent,
+  type TaskDelegation,
 } from "../../../../packages/domain/src/agent.ts";
 import type {
   ActionProposal,
@@ -32,7 +39,9 @@ import type { Store } from "../db.ts";
 import { AppError } from "../errors.ts";
 import type { Files } from "../files.ts";
 import { backgroundFailure } from "../log.ts";
+import type { OpenBotGateway } from "../openbot.ts";
 import type { WorkspaceService } from "../workspace.ts";
+import { delegatedFileProposal } from "./delegated-action.ts";
 import { analyzeSpending } from "./finance.ts";
 import { executeModelTask } from "./model.ts";
 import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
@@ -40,6 +49,142 @@ import { LostLeaseError, type TaskContext, TaskWorker } from "./worker.ts";
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const date = () => new Date().toISOString();
 const terminal = new Set(["succeeded", "failed", "cancelled"]);
+interface DelegatedRetryReservation {
+  id: string;
+  sourceTaskId: string;
+  taskId: string;
+  runId: string;
+  key: string;
+}
+const redact = (text: string) =>
+  text
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\bAuthorization\s*:\s*Basic\s+\S+/gi, "Authorization: Basic [redacted]")
+    .replace(/\b(https?:\/\/)[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(
+      /\b[a-z0-9_]*(?:(?:api|private|access)[\s_-]?key|token|cookie|password|secret|credential)[ \t]*[:=][ \t]*(?:"(?:[^"\\]|\\[\s\S])*(?:"|$)|'(?:[^'\\]|\\[\s\S])*(?:'|$)|[^\r\n]*)/gi,
+      "[redacted]",
+    );
+
+const unsafeExcerptLine = (line: string) =>
+  /(?:^|[^a-z])(?:secret|token|cookie|password|credential|bearer)(?:$|[^a-z])|\b[a-z0-9_]+(?:secret|token|cookie|password|credential|bearer)\s*[:=]|(?:api|private|access)[\s_-]?key|\bAuthorization\s*:|\bBasic\s+[A-Za-z0-9+/=]{12,}|https?:\/\/[^\s/]*@|-----BEGIN/i.test(
+    line,
+  );
+
+const safeIncludedText = (text?: string) => {
+  const safe = text
+    ? redact(
+        text
+          .split(/\r?\n/)
+          .filter((line) => !unsafeExcerptLine(line))
+          .join("\n")
+          .slice(0, 4000),
+      ).trim()
+    : "";
+  return safe || undefined;
+};
+
+async function namedText(root: string | undefined, path: string) {
+  const parts = path.split(/[\\/]/);
+  if (!root || isAbsolute(path) || parts.some((part) => !part || part === "." || part === ".."))
+    throw new AppError("This named resource cannot be read safely; supply its text", 422);
+  try {
+    const base = await realpath(root);
+    let current = base;
+    for (const part of parts) {
+      current = join(current, part);
+      if ((await lstat(current)).isSymbolicLink()) throw new Error();
+    }
+    const target = await realpath(resolve(base, path));
+    const inside = relative(join(base, parts[0] ?? ""), target);
+    if (!inside || inside === ".." || inside.startsWith("../") || isAbsolute(inside))
+      throw new Error();
+    const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await handle.stat();
+      if (
+        (await realpath(`/proc/self/fd/${handle.fd}`)) !== target ||
+        !info.isFile() ||
+        info.size > 64 * 1024
+      )
+        throw new Error();
+      const bytes = Buffer.alloc(64 * 1024 + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, length, bytes.length - length, length);
+        if (!bytesRead) break;
+        length += bytesRead;
+      }
+      if (length > 64 * 1024) throw new Error();
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, length));
+      if (text.includes("\0")) throw new Error();
+      return text;
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    throw new AppError("This named resource cannot be read safely; supply its text", 422);
+  }
+}
+
+function relevantExcerpt(text: string, request: string) {
+  const words = new Set(
+    (request.toLowerCase().match(/[a-z0-9]{4,}/g) ?? []).filter(
+      (word) => !["this", "that", "with", "from", "please", "summarize"].includes(word),
+    ),
+  );
+  return redact(
+    text
+      .split(/\r?\n/)
+      .filter(
+        (line) =>
+          !unsafeExcerptLine(line) && [...words].some((word) => line.toLowerCase().includes(word)),
+      )
+      .slice(0, 6)
+      .join("\n")
+      .slice(0, 4000),
+  );
+}
+
+function sentContext(input: {
+  prompt: string;
+  brief?: string;
+  sourcePath?: string;
+  resourcePath?: string;
+  replacementIntent?: "reviewed_replace_text";
+  excerpt?: string;
+  mode?: "direct" | "excerpt" | "supplied";
+  conversationId: string;
+  requestId: string;
+  botId: string;
+  runId: string;
+}) {
+  const context = [
+    `Task: ${redact(input.prompt.trim())}`,
+    ...(input.brief?.trim() ? [`Relevant brief: ${redact(input.brief.trim())}`] : []),
+    ...(input.sourcePath
+      ? [
+          `Named resource: local text reference (${input.mode === "direct" ? "read-only direct access" : input.mode === "supplied" ? "user-supplied content" : "excerpt only"})`,
+        ]
+      : []),
+    ...(input.mode === "direct" && input.resourcePath
+      ? [`Resource ID: ${hash(input.resourcePath).slice(0, 16)}`]
+      : []),
+    ...(input.mode === "direct" &&
+    input.resourcePath &&
+    input.replacementIntent === "reviewed_replace_text"
+      ? [
+          'For an explicitly requested actual text replacement of this named resource, you may append exactly one final fenced openmuse-action JSON block: {"kind":"file.replace_text","target":"named-resource","resourceId":"<Resource ID above>","expectedText":"<complete exact current UTF-8 text>","replacementText":"<complete replacement UTF-8 text>"}. OpenMuse verifies the current text and asks the person to review; you cannot change the file. For a draft, suggestion, unsupported action, or incomplete text, give useful copyable prose without this block.',
+        ]
+      : []),
+    ...(input.excerpt ? [`Included excerpt:\n${input.excerpt}`] : []),
+    `Conversation ID: ${input.conversationId}`,
+    `Request ID: ${input.requestId}`,
+    `Bot ID: ${input.botId}`,
+    `Run ID: ${input.runId}`,
+  ].join("\n");
+  return input.sourcePath ? context.replaceAll(input.sourcePath, "[named resource]") : context;
+}
 export class AgentService {
   readonly worker: TaskWorker;
   private maintenance?: ReturnType<typeof setInterval>;
@@ -53,6 +198,8 @@ export class AgentService {
     readonly browser: BrowserService,
     readonly computer: ComputerService = new ComputerService(db, config),
     readonly composio?: ComposioService,
+    readonly openbot?: OpenBotGateway,
+    readonly intelligence?: CopilotKitIntelligence,
   ) {
     this.worker = new TaskWorker(db, (owner, task, context) => this.execute(owner, task, context), {
       settled: (owner, task) => this.publishOutcome(owner, task),
@@ -79,6 +226,10 @@ export class AgentService {
       // Recover publications if the process exited after committing an outcome.
       for (const { owner, value } of await this.db.scan<AgentTask>("tasks"))
         await this.publishOutcome(owner, value);
+      for (const { owner, value } of await this.db.scan<DelegatedRetryReservation>(
+        "delegated-retries",
+      ))
+        await this.materializeRetry(owner, value);
       for (const { owner, value } of await this.db.scan<Monitor>("monitors"))
         await this.activateMonitor(owner, value);
       for (const { owner, value } of await this.db.scan<Idea>("ideas"))
@@ -230,6 +381,299 @@ export class AgentService {
     await this.db.insertIfAbsent(owner, "tasks", task);
     return (await this.db.get<AgentTask>(owner, "tasks", id)) ?? task;
   }
+  async createDelegatedTask(
+    owner: string,
+    input: {
+      conversationId: string;
+      requestId: string;
+      botId: string;
+      prompt: string;
+      brief?: string;
+      sourcePath?: string;
+      replacementIntent?: "reviewed_replace_text";
+      suppliedText?: string;
+    },
+  ) {
+    const main = await this.db.get<{ threadId: string }>(owner, "conversation-settings", "main");
+    if (main?.threadId !== input.conversationId) {
+      const local =
+        input.conversationId === "local-main" ||
+        (input.conversationId === "local" &&
+          (await this.db.get(owner, "conversations", "default")));
+      if (!local) {
+        if (!this.intelligence) throw new AppError("Conversation not found", 404);
+        try {
+          let cursor: string | undefined;
+          let found = false;
+          do {
+            const page = await this.intelligence.listThreads({
+              userId: owner,
+              agentId: "default",
+              ...(cursor ? { cursor } : {}),
+            });
+            found = page.threads.some(
+              (thread) =>
+                thread.id === input.conversationId &&
+                thread.agentId === "default" &&
+                thread.createdById === owner,
+            );
+            cursor = page.nextCursor ?? undefined;
+            if (found) break;
+          } while (cursor);
+          if (!found) throw new AppError("Conversation not found", 404);
+        } catch (error) {
+          if (error instanceof AppError) throw error;
+          throw new AppError("Conversation ownership could not be verified", 502);
+        }
+      }
+    }
+    const key = `openbot:${input.conversationId}:${input.requestId}`;
+    const id = hash(`task:${key}`);
+    const existing = await this.db.get<AgentTask>(owner, "tasks", id);
+    const safePrompt = redact(input.prompt.trim());
+    if (input.replacementIntent && !input.sourcePath)
+      throw new AppError("A reviewed replacement needs a named local file", 422);
+    const safeBrief = input.brief ? redact(input.brief.trim()) : undefined;
+    const resourcePath = input.sourcePath
+      ? `${hash(owner).slice(0, 24)}/${input.sourcePath}`
+      : undefined;
+    const sourceText = resourcePath
+      ? await namedText(this.config.openbotScopedReadRoot, resourcePath).catch((error) => {
+          if (input.suppliedText) return null;
+          throw error;
+        })
+      : null;
+    const sourceExcerpt = sourceText
+      ? safeIncludedText(relevantExcerpt(sourceText, `${safePrompt} ${safeBrief ?? ""}`))
+      : undefined;
+    const fallbackExcerpt = sourceExcerpt || safeIncludedText(input.suppliedText?.trim());
+    const mode =
+      input.sourcePath &&
+      sourceText &&
+      this.config.openbotScopedReadToken &&
+      this.config.openbotScopedReadSigningKey &&
+      this.config.openbotScopedReadSigningKey.length >= 32 &&
+      this.config.openbotScopedReadSigningKey !== this.config.openbotScopedReadToken
+        ? ("direct" as const)
+        : sourceExcerpt
+          ? ("excerpt" as const)
+          : input.suppliedText
+            ? ("supplied" as const)
+            : undefined;
+    const formatted = (runId: string, botId: string) =>
+      sentContext({
+        ...input,
+        prompt: safePrompt,
+        brief: safeBrief,
+        botId,
+        runId,
+        resourcePath,
+        mode,
+        excerpt: mode === "direct" ? undefined : fallbackExcerpt,
+      });
+    if (existing) {
+      if (
+        !existing.delegation ||
+        (existing.delegation.botId !== input.botId &&
+          existing.delegation.botName.toLowerCase() !== input.botId.toLowerCase()) ||
+        existing.prompt !== safePrompt ||
+        existing.delegation.brief !== safeBrief ||
+        existing.delegation.sourcePath !== input.sourcePath ||
+        existing.delegation.replacementIntent !== input.replacementIntent ||
+        existing.delegation.resourcePath !== resourcePath ||
+        safeIncludedText(existing.delegation.fallbackExcerpt) !== fallbackExcerpt
+      )
+        throw new AppError("This request already has a different task", 409);
+      return existing;
+    }
+    if (input.suppliedText && !fallbackExcerpt)
+      throw new AppError("No safe supplied text was found; remove credentials and try again", 422);
+    if (input.sourcePath && !fallbackExcerpt)
+      throw new AppError("No relevant excerpt was found; supply the text to include", 422);
+    if (!this.openbot) throw new AppError("OpenBot is unavailable", 503);
+    const bot = await this.openbot.eligibleBot(input.botId);
+    if (
+      (await this.db.list<AgentTask>(owner, "tasks")).filter((t) => !terminal.has(t.status))
+        .length >= 100
+    )
+      throw new AppError("Finish or cancel some tasks before adding more", 409);
+    const runId = randomUUID();
+    const task: AgentTask = {
+      id,
+      title: safePrompt.slice(0, 90),
+      prompt: safePrompt,
+      kind: "openbot",
+      status: "queued",
+      plan: [],
+      evidence: [],
+      input: {},
+      state: { connectionId: (await this.workspace.connection(owner))?.id ?? null },
+      createdAt: date(),
+      updatedAt: date(),
+      attempts: 0,
+      leaseId: null,
+      leaseUntil: null,
+      artifactIds: [],
+      delegation: {
+        conversationId: input.conversationId,
+        requestId: input.requestId,
+        botId: bot.id,
+        botName: bot.name,
+        brief: safeBrief,
+        sentContext: formatted(runId, bot.id),
+        sourcePath: input.sourcePath,
+        replacementIntent: input.replacementIntent,
+        resourcePath,
+        fallbackExcerpt,
+        readMode: mode,
+        runId,
+        channelAttempted: false,
+        submissionAttempted: false,
+      },
+    };
+    await this.ensure(owner);
+    await this.db.insertIfAbsent(owner, "tasks", task);
+    const latest = await this.getTask(owner, id);
+    if (
+      !latest.delegation ||
+      latest.prompt !== safePrompt ||
+      latest.delegation.brief !== safeBrief ||
+      latest.delegation.sourcePath !== input.sourcePath ||
+      latest.delegation.replacementIntent !== input.replacementIntent ||
+      latest.delegation.resourcePath !== resourcePath ||
+      latest.delegation.fallbackExcerpt !== fallbackExcerpt ||
+      latest.delegation.botId !== bot.id ||
+      latest.delegation.conversationId !== input.conversationId
+    )
+      throw new AppError("This request already has a different task", 409);
+    return latest;
+  }
+  private async materializeRetry(owner: string, reservation: DelegatedRetryReservation) {
+    const existing = await this.db.get<AgentTask>(owner, "tasks", reservation.taskId);
+    if (existing) return existing;
+    const source = await this.getTask(owner, reservation.sourceTaskId);
+    if (!source.delegation) throw new AppError("Original delegated task is unavailable", 409);
+    const delegation = source.delegation;
+    const excerptStart = delegation.sentContext.indexOf("\nIncluded excerpt:\n");
+    const excerptEnd = delegation.sentContext.lastIndexOf("\nConversation ID: ");
+    const fallbackExcerpt =
+      delegation.fallbackExcerpt ??
+      (excerptStart >= 0 && excerptEnd > excerptStart
+        ? delegation.sentContext.slice(excerptStart + "\nIncluded excerpt:\n".length, excerptEnd)
+        : undefined);
+    const runLine = `\nRun ID: ${delegation.runId}`;
+    const runLineAt = delegation.sentContext.lastIndexOf(runLine);
+    const createdAt = date();
+    const replacement: AgentTask = {
+      ...source,
+      id: reservation.taskId,
+      retryOfTaskId: source.id,
+      retryRootTaskId: reservation.id,
+      retryKey: reservation.key,
+      status: "queued",
+      nextRunAt: undefined,
+      plan: [],
+      evidence: [],
+      input: {},
+      state: { connectionId: source.state.connectionId ?? null },
+      createdAt,
+      updatedAt: createdAt,
+      attempts: 0,
+      leaseId: null,
+      leaseUntil: null,
+      artifactIds: [],
+      actionId: null,
+      result: undefined,
+      error: null,
+      question: undefined,
+      delegation: {
+        conversationId: delegation.conversationId,
+        requestId: delegation.requestId,
+        botId: delegation.botId,
+        botName: delegation.botName,
+        brief: delegation.brief,
+        sourcePath: delegation.sourcePath,
+        replacementIntent: delegation.replacementIntent,
+        resourcePath: delegation.resourcePath,
+        fallbackExcerpt,
+        readMode: delegation.readMode,
+        runId: reservation.runId,
+        sentContext:
+          runLineAt >= 0
+            ? `${delegation.sentContext.slice(0, runLineAt)}\nRun ID: ${reservation.runId}${delegation.sentContext.slice(runLineAt + runLine.length)}`
+            : sentContext({
+                prompt: source.prompt,
+                brief: delegation.brief,
+                sourcePath: delegation.sourcePath,
+                replacementIntent: delegation.replacementIntent,
+                resourcePath: delegation.resourcePath,
+                excerpt: delegation.readMode === "direct" ? undefined : fallbackExcerpt,
+                mode: delegation.readMode,
+                conversationId: delegation.conversationId,
+                requestId: delegation.requestId,
+                botId: delegation.botId,
+                runId: reservation.runId,
+              }),
+        channelAttempted: false,
+        submissionAttempted: false,
+      },
+    };
+    await this.db.insertIfAbsent(owner, "tasks", replacement);
+    return this.getTask(owner, reservation.taskId);
+  }
+  async retryDelegation(owner: string, id: string, key: string, acknowledged: boolean) {
+    if (!acknowledged)
+      throw new AppError(
+        "Acknowledge that the original run may still complete and an external effect could repeat",
+        422,
+      );
+    let source = await this.getTask(owner, id);
+    if (!source.delegation) throw new AppError("Only delegated tasks use warned retry", 409);
+    const rootId = source.retryRootTaskId ?? source.id;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const prior = (await this.db.list<AgentTask>(owner, "tasks")).find(
+        (task) =>
+          task.retryRootTaskId === rootId && task.retryOfTaskId === id && task.retryKey === key,
+      );
+      if (prior) return prior;
+      const saved = await this.db.get<DelegatedRetryReservation>(
+        owner,
+        "delegated-retries",
+        rootId,
+      );
+      if (saved?.sourceTaskId === id && saved.key === key)
+        return this.materializeRetry(owner, saved);
+      if (saved && saved.taskId !== id)
+        throw new AppError("Review the latest linked attempt before retrying again", 409);
+      source = await this.getTask(owner, id);
+      if (!source.delegation) throw new AppError("Only delegated tasks use warned retry", 409);
+      if (source.status !== "failed" && source.status !== "outcome_unknown")
+        throw new AppError("Only a confirmed failure or Outcome unknown can be retried", 409);
+      if (source.actionId) {
+        const action = await this.db.get<ActionProposal>(owner, "actions", source.actionId);
+        if (action && ["awaiting_review", "executing", "outcome_unknown"].includes(action.status))
+          throw new AppError("Check the linked reviewed action before retrying", 409);
+      }
+      if (!this.openbot) throw new AppError("OpenBot is unavailable", 503);
+      await this.openbot.eligibleBot(source.delegation.botId);
+      const reservation: DelegatedRetryReservation = {
+        id: rootId,
+        sourceTaskId: id,
+        taskId: randomUUID(),
+        runId: randomUUID(),
+        key,
+      };
+      const won = await this.db.reserveDelegatedRetry(
+        owner,
+        id,
+        rootId,
+        saved?.taskId ?? "",
+        reservation,
+      );
+      if (won) return this.materializeRetry(owner, won);
+    }
+    throw new AppError("Retry changed; refresh and try again", 409);
+  }
   async control(owner: string, id: string, action: "pause" | "resume" | "cancel" | "retry") {
     const task = await this.getTask(owner, id);
     const linked = task.actionId
@@ -249,6 +693,20 @@ export class AgentService {
       throw new AppError("This reviewed action already completed. Check its result first.", 409);
     if (action === "cancel" && task.status === "succeeded")
       throw new AppError("This task is already complete", 409);
+    // Claim denial on the Action row before cancelling; approval must lose that same claim.
+    if (action === "cancel" && linked?.status === "awaiting_review") {
+      const denied = await this.actions.decide(owner, linked.id, linked.hash, "deny");
+      if (denied.status !== "denied" && denied.status !== "expired")
+        throw new AppError(
+          "The reviewed action started; check its outcome before cancelling.",
+          409,
+        );
+    }
+    if (task.delegation) {
+      if (action !== "cancel")
+        throw new AppError("Only stopping is available for delegated tasks", 409);
+      return this.stopDelegation(owner, task);
+    }
     if (action === "retry" && task.status !== "failed")
       throw new AppError("Only failed tasks can be retried", 409);
     if (action === "resume" && task.status !== "paused")
@@ -267,15 +725,6 @@ export class AgentService {
       if (a && a.status !== "succeeded")
         throw new AppError(
           "Check the reviewed action before retrying; its outcome may be uncertain. Start a new task when reconciled.",
-          409,
-        );
-    }
-    // Claim denial on the Action row before cancelling; approval must lose that same claim.
-    if (action === "cancel" && linked?.status === "awaiting_review") {
-      const denied = await this.actions.decide(owner, linked.id, linked.hash, "deny");
-      if (denied.status !== "denied" && denied.status !== "expired")
-        throw new AppError(
-          "The reviewed action started; check its outcome before cancelling.",
           409,
         );
     }
@@ -328,6 +777,120 @@ export class AgentService {
     });
     return updated;
   }
+  private async stopDelegation(owner: string, task: AgentTask): Promise<AgentTask> {
+    const delegation = task.delegation;
+    if (!delegation) throw new AppError("Delegation is missing", 409);
+    if (delegation.stop === "confirmed" || task.status === "cancelled") return task;
+    if (terminal.has(task.status) || delegation.terminal)
+      throw new AppError("The original Bot run already ended; check its result", 409);
+    if (delegation.stop === "pending")
+      throw new AppError("A stop request is already being checked", 409);
+    if (delegation.stop === "unconfirmed")
+      throw new AppError(
+        "Stop unconfirmed. Check the original run before requesting another stop; current active-run proof is unavailable.",
+        409,
+      );
+    if (!delegation.submissionAttempted) {
+      const cancelled = await this.db.compareAndSwap<AgentTask>(
+        owner,
+        "tasks",
+        task.id,
+        { status: task.status, delegation },
+        {
+          status: "cancelled",
+          delegation: {
+            ...delegation,
+            stop: "confirmed",
+            stoppedAt: date(),
+            stopReconciledAt: date(),
+          },
+          leaseId: null,
+          leaseUntil: null,
+          updatedAt: date(),
+          result: "Cancelled before Bot submission.",
+        },
+        true,
+      );
+      if (!cancelled) throw new AppError("Task changed; refresh and try again", 409);
+      this.worker.abort(task.id);
+      return cancelled;
+    }
+    const canStop = Boolean(
+      delegation.botId && delegation.threadId && delegation.runId && this.openbot,
+    );
+    const requested = await this.db.compareAndSwap<AgentTask>(
+      owner,
+      "tasks",
+      task.id,
+      { status: task.status, delegation },
+      {
+        status: "outcome_unknown",
+        delegation: {
+          ...delegation,
+          stop: "pending",
+          ...(canStop ? { stopAttemptedAt: date() } : {}),
+        },
+        leaseId: null,
+        leaseUntil: null,
+        nextRunAt: new Date(Date.now() + 5000).toISOString(),
+        updatedAt: date(),
+        error: "Stop unconfirmed. OpenMuse is checking the original Bot run.",
+      },
+      true,
+    );
+    if (!requested) throw new AppError("Task changed; refresh and try again", 409);
+    this.worker.abort(task.id);
+    let accepted = false;
+    if (canStop && delegation.threadId && this.openbot)
+      try {
+        accepted = await this.openbot.stopRun(
+          delegation.botId,
+          delegation.threadId,
+          delegation.runId,
+        );
+      } catch {
+        /* A lost response cannot prove whether the remote stop happened. */
+      }
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const latest = await this.getTask(owner, task.id);
+      if (latest.delegation?.runId !== delegation.runId || latest.delegation.stop !== "pending")
+        return latest;
+      const updated = await this.db.compareAndSwap<AgentTask>(
+        owner,
+        "tasks",
+        task.id,
+        { status: latest.status, delegation: latest.delegation },
+        {
+          status: accepted
+            ? "cancelled"
+            : terminal.has(latest.status)
+              ? latest.status
+              : "outcome_unknown",
+          delegation: {
+            ...latest.delegation,
+            stop: accepted ? "confirmed" : "unconfirmed",
+            ...(accepted ? { stoppedAt: date() } : {}),
+          },
+          updatedAt: date(),
+          error: accepted
+            ? null
+            : terminal.has(latest.status)
+              ? latest.error
+              : "Stop unconfirmed. OpenMuse is checking the original Bot run.",
+          result: accepted
+            ? "Bot stop confirmed. Started external changes may remain."
+            : latest.result,
+        },
+        true,
+      );
+      if (updated) return updated;
+    }
+    throw new AppError(
+      "Stop response could not be saved; refresh the task and reconcile the original run",
+      409,
+    );
+  }
+
   async answer(
     owner: string,
     id: string,
@@ -756,6 +1319,7 @@ export class AgentService {
     task: AgentTask,
     context: TaskContext,
   ): Promise<Partial<AgentTask>> {
+    if (task.delegation) return this.executeDelegation(owner, task, context);
     await context.event(
       "status",
       task.attempts === 1 ? "Started working" : "Resumed work",
@@ -864,6 +1428,285 @@ export class AgentService {
     }
     return executeModelTask(this, owner, task, context);
   }
+  private async executeDelegation(
+    owner: string,
+    task: AgentTask,
+    context: TaskContext,
+  ): Promise<Partial<AgentTask>> {
+    const gateway = this.openbot;
+    if (!gateway || !task.delegation) throw new Error("OpenBot is unavailable");
+    let delegation = task.delegation;
+    const now = () => new Date(context.now()).toISOString();
+    const save = async (patch: Partial<TaskDelegation>) => {
+      const next = await context.checkpoint({ delegation: { ...delegation, ...patch } });
+      if (!next.delegation) throw new LostLeaseError();
+      delegation = next.delegation;
+    };
+    const pending = async (lost: boolean): Promise<Partial<AgentTask>> => {
+      if (lost && !delegation.transportLostAt) await save({ transportLostAt: now() });
+      if (delegation.stop === "confirmed") return { status: "cancelled", delegation };
+      if (delegation.stop) return { status: "outcome_unknown", delegation };
+      if (
+        delegation.transportLostAt &&
+        context.now() - Date.parse(delegation.transportLostAt) >= 5 * 60_000
+      )
+        return {
+          status: "outcome_unknown",
+          error: "The original OpenBot run could not be recovered yet. Reconciliation continues.",
+          delegation,
+        };
+      if (
+        !delegation.transportLostAt &&
+        context.now() - Date.parse(delegation.lastProgressAt ?? task.createdAt) >= 10 * 60_000 &&
+        !delegation.delayedAt
+      )
+        await save({ delayedAt: now() });
+      if (task.status === "outcome_unknown") return { status: "outcome_unknown", delegation };
+      return { status: "running", error: null, delegation };
+    };
+    const observe = async (event: OpenBotRunObservation) => {
+      if (delegation.terminal || (event.cursor && event.cursor === delegation.replayCursor)) return;
+      await save({
+        lastProgressAt: now(),
+        lastProgress: event.type,
+        delayedAt: undefined,
+        ...(event.cursor ? { replayCursor: event.cursor } : {}),
+        ...(event.messageId
+          ? { messageIds: [...new Set([...(delegation.messageIds ?? []), event.messageId])] }
+          : {}),
+        ...(event.terminal ? { terminal: event.terminal } : {}),
+      });
+    };
+    if (!delegation.submissionAttempted) {
+      const safeExcerpt = safeIncludedText(delegation.fallbackExcerpt);
+      const safeContext = sentContext({
+        prompt: task.prompt,
+        brief: delegation.brief,
+        sourcePath: delegation.sourcePath,
+        replacementIntent: delegation.replacementIntent,
+        resourcePath: delegation.resourcePath,
+        excerpt: delegation.readMode === "direct" ? undefined : safeExcerpt,
+        mode: delegation.readMode,
+        conversationId: delegation.conversationId,
+        requestId: delegation.requestId,
+        botId: delegation.botId,
+        runId: delegation.runId,
+      });
+      if (delegation.fallbackExcerpt !== safeExcerpt || delegation.sentContext !== safeContext)
+        await save({ fallbackExcerpt: safeExcerpt, sentContext: safeContext });
+      if (
+        (delegation.readMode === "excerpt" || delegation.readMode === "supplied") &&
+        !safeExcerpt
+      ) {
+        if (delegation.channelAttempted && !delegation.threadId) return pending(true);
+        return {
+          status: "failed",
+          error: "No safe named-resource read or excerpt is available",
+          delegation,
+        };
+      }
+    }
+    if (!delegation.channelAttempted) {
+      await gateway.eligibleBot(delegation.botId);
+      await save({ channelAttempted: true });
+      try {
+        const channel = await gateway.createTaskChannel(delegation.botId);
+        await save({ channelId: channel.channelId, threadId: channel.threadId });
+      } catch (error) {
+        if (error instanceof LostLeaseError) throw error;
+        return pending(true);
+      }
+    }
+    if (!delegation.threadId) return pending(true);
+    if (!delegation.submissionAttempted) {
+      try {
+        await gateway.eligibleBot(delegation.botId);
+      } catch {
+        return {
+          status: "failed",
+          error: "The named Bot is no longer eligible for a text-only task",
+          delegation,
+        };
+      }
+      let scopeSecret: string | undefined;
+      if (delegation.readMode === "direct") {
+        if (!delegation.resourcePath)
+          return {
+            status: "failed",
+            error: "No safe named-resource read or excerpt is available",
+            delegation,
+          };
+        try {
+          scopeSecret = await gateway.bindScopedRead(
+            owner,
+            task.id,
+            delegation.botId,
+            delegation.threadId,
+            delegation.runId,
+            delegation.resourcePath,
+          );
+        } catch (error) {
+          if (error instanceof LostLeaseError) throw error;
+          if (!delegation.fallbackExcerpt)
+            return {
+              status: "failed",
+              error: "No safe named-resource read or excerpt is available",
+              delegation,
+            };
+          await save({
+            readMode: "excerpt",
+            sentContext: sentContext({
+              prompt: task.prompt,
+              brief: delegation.brief,
+              sourcePath: delegation.sourcePath,
+              replacementIntent: delegation.replacementIntent,
+              resourcePath: delegation.resourcePath,
+              excerpt: delegation.fallbackExcerpt,
+              mode: "excerpt",
+              conversationId: delegation.conversationId,
+              requestId: delegation.requestId,
+              botId: delegation.botId,
+              runId: delegation.runId,
+            }),
+          });
+        }
+      }
+      try {
+        await gateway.eligibleBot(delegation.botId);
+      } catch {
+        return {
+          status: "failed",
+          error: "The named Bot is no longer eligible for a text-only task",
+          delegation,
+        };
+      }
+      await save({ submissionAttempted: true, lastProgressAt: now() });
+      try {
+        const run = await gateway.runText(
+          delegation.botId,
+          delegation.threadId,
+          delegation.runId,
+          delegation.sentContext,
+          () => save({ startupAcknowledged: true, lastProgressAt: now() }),
+          context.signal,
+          observe,
+          scopeSecret,
+        );
+        if (run.terminal !== "unconfirmed" && !delegation.terminal)
+          await save({ terminal: run.terminal, messageIds: run.messageIds });
+        if (run.lost) return pending(true);
+      } catch (error) {
+        if (error instanceof LostLeaseError) throw error;
+        return pending(true);
+      }
+    } else if (!delegation.terminal) {
+      try {
+        const run = await gateway.reconnectRun(
+          delegation.botId,
+          delegation.threadId,
+          delegation.runId,
+          delegation.replayCursor,
+          observe,
+          context.signal,
+        );
+        if (run.terminal !== "unconfirmed" && !delegation.terminal)
+          await save({ terminal: run.terminal, messageIds: run.messageIds });
+        if (run.lost) return pending(true);
+      } catch (error) {
+        if (error instanceof LostLeaseError) throw error;
+        return pending(true);
+      }
+    }
+    if (!delegation.terminal) return pending(false);
+    if (delegation.stop === "confirmed") {
+      const lateOutput = await gateway
+        .textResult(delegation.botId, delegation.threadId, delegation.messageIds ?? [])
+        .catch(() => "");
+      if (lateOutput || !delegation.messageIds?.length)
+        await save({
+          stopReconciledAt: now(),
+          ...(lateOutput ? { lateOutput, lateOutputAt: now() } : {}),
+        });
+      return { status: "cancelled", delegation };
+    }
+    if (delegation.terminal === "error")
+      return { status: "failed", error: "The linked OpenBot run reported an error", delegation };
+    try {
+      let output = delegation.output;
+      if (!output && delegation.replacementIntent === "reviewed_replace_text") {
+        // OpenBot's history can briefly contain a partial assistant message after RUN_FINISHED.
+        // Do not freeze that first snapshot as the text or as an executable proposal.
+        let previous = "";
+        let stableReads = 0;
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const current = await gateway.textResult(
+            delegation.botId,
+            delegation.threadId,
+            delegation.messageIds ?? [],
+          );
+          stableReads = current && current === previous ? stableReads + 1 : current ? 1 : 0;
+          if (stableReads >= 3) {
+            output = current;
+            break;
+          }
+          previous = current;
+          if (attempt < 7) await delay(500, undefined, { signal: context.signal });
+        }
+        if (!output) return pending(false);
+      }
+      output ??= await gateway.textResult(
+        delegation.botId,
+        delegation.threadId,
+        delegation.messageIds ?? [],
+      );
+      if (!output)
+        return {
+          status: "failed",
+          error: "The linked OpenBot run finished without a usable answer",
+          delegation,
+        };
+      if (!delegation.output) await save({ output });
+      const proposal = delegatedFileProposal(output, delegation);
+      if (proposal && !task.actionId) {
+        const rootId = task.retryRootTaskId ?? task.id;
+        const retry = await this.db.get<DelegatedRetryReservation>(
+          owner,
+          "delegated-retries",
+          rootId,
+        );
+        if (!retry || retry.taskId === task.id) {
+          try {
+            const action = await this.actions.propose(
+              owner,
+              proposal,
+              `delegated-file:${task.id}:${delegation.runId}`,
+              task.id,
+            );
+            task = await context.checkpoint({ actionId: action.id });
+            await context.event("approval", "Exact file action ready for review", action.title);
+          } catch (error) {
+            if (error instanceof LostLeaseError) throw error;
+            await context.event(
+              "observation",
+              "Bot proposal kept as text",
+              error instanceof Error ? error.message : "The exact action could not be prepared",
+            );
+          }
+        }
+      }
+      await context.event("result", "Bot answered", output);
+      return {
+        status: "succeeded",
+        result: output,
+        error: null,
+        delegation,
+        ...(task.actionId ? { actionId: task.actionId } : {}),
+      };
+    } catch (error) {
+      if (error instanceof LostLeaseError) throw error;
+      return pending(true);
+    }
+  }
   async finish(task: AgentTask, context: TaskContext, result: string) {
     await context.guard();
     await context.event("result", "Work completed", result);
@@ -912,7 +1755,23 @@ export class AgentService {
         "Task needs attention",
         task.error ?? task.title,
         task.id,
-        `task-error:${task.id}:${task.attempts}`,
+        task.delegation ? `task-error:${task.id}` : `task-error:${task.id}:${task.attempts}`,
+      );
+    } else if (task.status === "outcome_unknown" && task.delegation) {
+      await this.notify(
+        owner,
+        "Outcome unknown",
+        "The original Bot run could not be verified yet. OpenMuse is still checking it.",
+        task.id,
+        `task-unknown:${task.id}`,
+      );
+    } else if (task.status === "cancelled" && task.delegation?.lateOutput) {
+      await this.notify(
+        owner,
+        "Bot output arrived after stop",
+        "Late output is saved on the original task. Review any external changes separately.",
+        task.id,
+        `task-late:${task.id}`,
       );
     } else if (task.status === "waiting_input") {
       await this.notify(

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { IntelligenceAgent } from "@copilotkit/core";
+import { Observable } from "rxjs";
 import {
   OpenBotAdapter,
   OpenBotError,
@@ -30,6 +32,132 @@ const navigation = {
   truncated: false,
   elapsedMs: 50,
 };
+
+test("delegation eligibility requires empty effective plugin and host grants", async () => {
+  let held = false;
+  const { adapter } = fixture((path) =>
+    Response.json(
+      path.startsWith("/api/plugins/for/")
+        ? { tools: held ? [{ ref: "host/shell" }] : [], skills: [] }
+        : { grants: [], pending: [], connected: false },
+    ),
+  );
+  assert.equal(await adapter.hasNoEffectiveGrants("bot-1"), true);
+  held = true;
+  assert.equal(await adapter.hasNoEffectiveGrants("bot-1"), false);
+});
+
+test("only a terminal matching the saved thread and run can settle a delegated attempt", async (t) => {
+  const { adapter, transport } = fixture(() => Response.json({}));
+  const events = [
+    { type: "RUN_FINISHED", threadId: "other-thread", runId: "run-1" },
+    { type: "RUN_FINISHED", threadId: "thread-1", runId: "other-run" },
+  ];
+  t.mock.method(
+    IntelligenceAgent.prototype,
+    "run",
+    () =>
+      new Observable((subscriber) => {
+        for (const event of events) subscriber.next(event);
+        subscriber.complete();
+      }),
+  );
+  transport.socketUrl = "ws://openbot.example/socket";
+  assert.equal(
+    (await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {})).terminal,
+    "unconfirmed",
+  );
+  events.push({ type: "RUN_FINISHED", threadId: "thread-1", runId: "run-1" });
+  assert.equal(
+    (await adapter.runText("bot-1", "thread-1", "run-1", "Task only", async () => {})).terminal,
+    "finished",
+  );
+});
+
+test("a saved answer must have a message ID emitted by the matching run", async (t) => {
+  const { adapter, transport } = fixture((path) => {
+    assert.match(path, /\/messages\?/);
+    return Response.json({
+      messages: [
+        { id: "tool-call", role: "assistant", toolCalls: [{ name: "read_named_resource" }] },
+        { id: "answer-1", role: "assistant", content: "The linked answer" },
+        { id: "other-answer", role: "assistant", content: "Another native chat reply" },
+      ],
+    });
+  });
+  transport.socketUrl = "ws://openbot.example/socket";
+  t.mock.method(
+    IntelligenceAgent.prototype,
+    "run",
+    () =>
+      new Observable((subscriber) => {
+        subscriber.next({ type: "RUN_STARTED", threadId: "thread-1", runId: "run-1" });
+        subscriber.next({ type: "TEXT_MESSAGE_START", role: "user", messageId: "user-1" });
+        subscriber.next({ type: "TEXT_MESSAGE_START", role: "assistant", messageId: "answer-1" });
+        subscriber.next({ type: "TEXT_MESSAGE_END", messageId: "answer-1" });
+        subscriber.next({ type: "RUN_FINISHED", threadId: "thread-1", runId: "run-1" });
+        subscriber.complete();
+      }),
+  );
+  const observedIds: string[] = [];
+  const run = await adapter.runText(
+    "bot-1",
+    "thread-1",
+    "run-1",
+    "Task only",
+    async () => {},
+    undefined,
+    async (event) => {
+      if (event.messageId) observedIds.push(event.messageId);
+    },
+  );
+  assert.deepEqual(run, { terminal: "finished", messageIds: ["answer-1"] });
+  assert.deepEqual(observedIds, ["answer-1"]);
+  assert.equal(await adapter.textResult("bot-1", "thread-1", run.messageIds), "The linked answer");
+  assert.equal(await adapter.textResult("bot-1", "thread-1", ["missing"]), "");
+});
+
+test("reconnect uses the saved cursor and ignores another run's events", async (t) => {
+  const { adapter, transport } = fixture(() => {
+    throw new Error("reconnect must not submit a run");
+  });
+  transport.socketUrl = "ws://openbot.example/socket";
+  const prototype = IntelligenceAgent.prototype as unknown as {
+    connect(input: unknown): Observable<unknown>;
+    getLastSeenEventId(threadId: string): string | null;
+  };
+  t.mock.method(prototype, "connect", function (this: typeof prototype) {
+    assert.equal(this.getLastSeenEventId("thread-1"), "event-2");
+    return new Observable((subscriber) => {
+      subscriber.next({ type: "RUN_STARTED", threadId: "other-thread", runId: "run-1" });
+      subscriber.next({ type: "TEXT_MESSAGE_START", role: "assistant", messageId: "wrong" });
+      subscriber.next({ type: "RUN_FINISHED", threadId: "thread-1", runId: "other-run" });
+      subscriber.next({ type: "RUN_STARTED", threadId: "thread-1", runId: "run-1" });
+      subscriber.next({
+        type: "TEXT_MESSAGE_START",
+        role: "assistant",
+        messageId: "answer-1",
+        metadata: { cpki_event_id: "event-3" },
+      });
+      subscriber.next({ type: "RUN_FINISHED", threadId: "thread-1", runId: "run-1" });
+      subscriber.complete();
+    });
+  });
+  const seen: string[] = [];
+  const result = await adapter.reconnectRun(
+    "bot-1",
+    "thread-1",
+    "run-1",
+    "event-2",
+    async (event) => {
+      seen.push(event.type);
+      if (event.messageId) assert.equal(event.cursor, "event-3");
+    },
+  );
+  assert.equal(result.terminal, "finished");
+  assert.deepEqual(result.messageIds, ["answer-1"]);
+  assert.deepEqual(seen, ["RUN_STARTED", "TEXT_MESSAGE_START", "RUN_FINISHED"]);
+});
 
 test("OpenBot is disabled by default and cannot call a supplied transport", async () => {
   const { transport, calls } = fixture(() => Response.json({}));

@@ -19,7 +19,7 @@ import {
   Users,
   X,
 } from "lucide-react-native";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Image, Linking, Pressable, Text, View } from "react-native";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
 import type { Artifact, BrowserSession } from "../../../packages/domain/src";
@@ -34,6 +34,8 @@ import type {
   RunEvent,
 } from "../../../packages/domain/src/agent";
 import { useAgentWorkspace } from "./agent-workspace";
+import { AssistantResponse } from "./assistant-response";
+import { delegatedTaskStatus } from "./delegated-chat";
 import { ActivityScreen, ConnectionsScreen } from "./screens";
 import {
   Button,
@@ -71,6 +73,73 @@ function errorText(e: unknown) {
 }
 function activeTask(task: AgentTask) {
   return !["succeeded", "failed", "cancelled"].includes(task.status);
+}
+export function DelegatedRetryControl({ task }: { task: AgentTask }) {
+  const { open } = useWorkspace();
+  const { data, mutate } = useAgentWorkspace();
+  const [showWarning, setShowWarning] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const key = useRef(`${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const previousTaskId = task.retryOfTaskId;
+  const replacement = data?.tasks.find((candidate) => candidate.retryOfTaskId === task.id);
+  const canRetry =
+    task.delegation && (task.status === "failed" || task.status === "outcome_unknown");
+  if (!task.delegation) return null;
+  return (
+    <View style={{ gap: 8 }}>
+      {previousTaskId && (
+        <Button small onPress={() => open({ type: "task", taskId: previousTaskId })}>
+          Review previous attempt
+        </Button>
+      )}
+      {replacement ? (
+        <Button small onPress={() => open({ type: "task", taskId: replacement.id })}>
+          Review replacement attempt · {delegatedTaskStatus(replacement)}
+        </Button>
+      ) : canRetry ? (
+        showWarning ? (
+          <Card style={{ gap: 8 }}>
+            <Text style={s.heading}>Before you retry</Text>
+            <Text style={s.text}>
+              The original Bot run may still complete. Retrying could repeat an external effect.
+              Review the original attempt and any linked action before proceeding.
+            </Text>
+            <CheckRow
+              label="I understand the original run may still complete and an external effect could repeat"
+              checked={acknowledged}
+              onPress={() => setAcknowledged((value) => !value)}
+            />
+            <Button
+              small
+              busy={busy}
+              disabled={!acknowledged}
+              onPress={() => {
+                if (!acknowledged || busy) return;
+                setBusy(true);
+                setError("");
+                void mutate<AgentTask>(`/tasks/${task.id}/retry-delegation`, {
+                  key: key.current,
+                  acknowledged: true,
+                })
+                  .then((next) => open({ type: "task", taskId: next.id }))
+                  .catch((cause) => setError(errorText(cause)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              Proceed with new attempt
+            </Button>
+            <ErrorNotice error={error} />
+          </Card>
+        ) : (
+          <Button small icon={RefreshCw} onPress={() => setShowWarning(true)}>
+            Retry Bot task
+          </Button>
+        )
+      ) : null}
+    </View>
+  );
 }
 export function AgentStatus() {
   const { data, error, refresh } = useAgentWorkspace();
@@ -131,8 +200,9 @@ export function TaskCard({
           </View>
           <View style={{ flex: 1, gap: 4 }}>
             <Text style={s.heading}>{task.title}</Text>
+            {task.delegation && <Text style={s.small}>Bot: {task.delegation.botName}</Text>}
             <Text style={s.small}>
-              {statusLabel(task.status)}
+              {task.delegation ? delegatedTaskStatus(task) : statusLabel(task.status)}
               {task.plan.length ? ` · ${done}/${task.plan.length} steps` : ""}
             </Text>
           </View>
@@ -376,7 +446,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
       title={task?.title || "Task"}
       subtitle={
         task
-          ? `${uncertainAction ? "Outcome unknown" : statusLabel(task.status)} · ${stamp(task.updatedAt)}`
+          ? `${uncertainAction ? "Outcome unknown" : task.delegation ? delegatedTaskStatus(task) : statusLabel(task.status)} · ${stamp(task.updatedAt)}`
           : "Loading saved progress…"
       }
       onClose={close}
@@ -386,11 +456,13 @@ export function TaskDetail({ taskId }: { taskId: string }) {
         <ActivityIndicator color={colors.blueDark} />
       ) : (
         <View style={{ gap: 20 }}>
+          {task.delegation && <Text style={s.heading}>Bot: {task.delegation.botName}</Text>}
           <Text selectable style={s.text}>
             {task.prompt}
           </Text>
           <View style={[s.row, { gap: 8, flexWrap: "wrap" }]}>
-            {!uncertainAction &&
+            {!task.delegation &&
+              !uncertainAction &&
               ["queued", "running", "scheduled", "waiting_input", "waiting_approval"].includes(
                 task.status,
               ) && (
@@ -403,7 +475,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                   Pause
                 </Button>
               )}
-            {task.status === "paused" && !uncertainAction && (
+            {task.status === "paused" && !task.delegation && !uncertainAction && (
               <Button
                 small
                 icon={Play}
@@ -414,6 +486,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               </Button>
             )}
             {task.status === "failed" &&
+              !task.delegation &&
               (!task.actionId || linkedAction?.status === "succeeded") && (
                 <Button
                   small
@@ -424,7 +497,7 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                   Retry task
                 </Button>
               )}
-            {activeTask(task) && !uncertainAction && (
+            {activeTask(task) && !task.delegation && !uncertainAction && (
               <Button
                 small
                 danger
@@ -435,7 +508,41 @@ export function TaskDetail({ taskId }: { taskId: string }) {
                 Cancel task
               </Button>
             )}
+            {task.delegation && activeTask(task) && !task.delegation.stop && (
+              <Button
+                small
+                danger
+                icon={X}
+                busy={busy}
+                onPress={() => void act("control", { action: "cancel" })}
+              >
+                {task.delegation.submissionAttempted ? "Stop Bot run" : "Cancel before submission"}
+              </Button>
+            )}
           </View>
+          {task.delegation?.stop === "unconfirmed" || task.delegation?.stop === "pending" ? (
+            <Text style={s.muted}>
+              {task.status === "succeeded" || task.status === "failed"
+                ? "Stop was not confirmed; the original Bot run later ended."
+                : "Stop unconfirmed. The original Bot run is being reconciled. Check this task before requesting another stop."}
+            </Text>
+          ) : null}
+          {task.delegation?.stop === "confirmed" && (
+            <Text style={s.muted}>
+              {task.delegation.submissionAttempted
+                ? "Bot stop confirmed. Any external changes already started may remain."
+                : "Cancelled before Bot submission."}
+            </Text>
+          )}
+          <DelegatedRetryControl key={task.id} task={task} />
+          {!!task.delegation?.lateOutput && (
+            <Card style={{ gap: 8 }}>
+              <Text style={s.heading}>Late Bot output · {stamp(task.delegation.lateOutputAt)}</Text>
+              <Text selectable style={s.text}>
+                {task.delegation.lateOutput}
+              </Text>
+            </Card>
+          )}
           {uncertainAction && (
             <Card style={{ backgroundColor: colors.orange, gap: 10 }}>
               <Text style={s.heading}>Action outcome unknown</Text>
@@ -459,15 +566,19 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               )}
             </Card>
           )}
-          {task.status === "waiting_approval" && !uncertainAction && (
-            <Card style={{ backgroundColor: colors.lavender, gap: 12 }}>
-              <Text style={s.heading}>Ready for your review</Text>
-              <Text style={s.muted}>Review the exact action and account before it proceeds.</Text>
-              <Button primary busy={busy} onPress={() => void review()}>
-                Review action
-              </Button>
-            </Card>
-          )}
+          {(task.status === "waiting_approval" ||
+            (task.delegation &&
+              linkedAction?.kind === "file.replace_text" &&
+              linkedAction.status === "awaiting_review")) &&
+            !uncertainAction && (
+              <Card style={{ backgroundColor: colors.lavender, gap: 12 }}>
+                <Text style={s.heading}>Ready for your review</Text>
+                <Text style={s.muted}>Review the exact action before it proceeds.</Text>
+                <Button primary busy={busy} onPress={() => void review()}>
+                  Review action
+                </Button>
+              </Card>
+            )}
           {task.status === "waiting_input" && (
             <Card style={{ backgroundColor: colors.sky, gap: 10 }}>
               <Text style={s.heading}>{task.question || "A detail from you will help"}</Text>
@@ -552,11 +663,26 @@ export function TaskDetail({ taskId }: { taskId: string }) {
               ))}
             </Card>
           )}
-          {!!task.result && (
-            <Card style={{ backgroundColor: colors.green }}>
+          {task.delegation && (
+            <Card style={{ gap: 8 }}>
+              <Text style={s.heading}>Exact context sent</Text>
               <Text selectable style={s.text}>
-                {resultSummary(task.result)}
+                {task.delegation.sentContext}
               </Text>
+            </Card>
+          )}
+          {!!(task.result || task.delegation?.output) && (
+            <Card style={{ backgroundColor: colors.green, gap: 8 }}>
+              {task.delegation ? (
+                <>
+                  <Text style={s.heading}>Saved result</Text>
+                  <AssistantResponse content={task.result || task.delegation.output || ""} />
+                </>
+              ) : (
+                <Text selectable style={s.text}>
+                  {resultSummary(task.result || "")}
+                </Text>
+              )}
             </Card>
           )}
           <ErrorNotice error={task.error ?? undefined} />
@@ -908,7 +1034,7 @@ function FinanceArtifact({ artifact }: { artifact: AgentArtifact }) {
 export function DelegateSheet() {
   const { workspace, close, open } = useWorkspace();
   const { delegate } = useAgentWorkspace();
-  const [kind, setKind] = useState<AgentTask["kind"]>("plan");
+  const [kind, setKind] = useState<Exclude<AgentTask["kind"], "openbot">>("plan");
   const [prompt, setPrompt] = useState("");
   const [messageId, setMessageId] = useState("");
   const [csv, setCsv] = useState("");

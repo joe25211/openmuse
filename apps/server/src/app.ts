@@ -45,9 +45,17 @@ export async function createApp(
       connection: (owner, input) => composio.connection(owner, input),
       execute: (owner, input, connectionId) => composio.execute(owner, input, connectionId),
     },
+    scopedReadRoot: config.openbotScopedReadRoot,
   });
+  for (const { owner, value } of await db.scan<{ id: string; kind: string; status: string }>(
+    "actions",
+  ))
+    if (value.kind === "file.replace_text" && value.status === "outcome_unknown")
+      await actions.reconcileLocalFile(owner, value.id);
+  await actions.recoverLocalClaims();
   const browser = new BrowserService(db, config, auth, files);
   const computer = new ComputerService(db, config, options.docker);
+  const intelligence = new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
   const agent = new AgentService(
     db,
     config,
@@ -57,8 +65,9 @@ export async function createApp(
     browser,
     computer,
     composio,
+    openbot,
+    intelligence,
   );
-  const intelligence = new CopilotKitIntelligence({ apiKey: config.intelligenceApiKey });
   const runtime = makeRuntime(config, agent, auth, intelligence);
   const app = new Hono<{ Variables: { owner: string } }>();
   const origins = new Set([...config.allowedOrigins, new URL(config.publicUrl).origin]);
@@ -186,6 +195,9 @@ export async function createApp(
     return c.json(snapshot);
   });
   app.get("/api/openbot/agents", async (c) => c.json(await openbot.agents()));
+  app.get("/api/openbot/agents/:id/eligibility", async (c) =>
+    c.json({ bot: await openbot.eligibleBot(c.req.param("id")), eligible: true }),
+  );
   app.get("/api/openbot/channels", async (c) =>
     c.json(await openbot.channels(z.string().max(2048).optional().parse(c.req.query("cursor")))),
   );
@@ -206,6 +218,26 @@ export async function createApp(
   app.all("/api/openbot/copilotkit/*", (c) =>
     openbot.runtime(c.req.raw, c.req.path.slice("/api/openbot/copilotkit/".length)),
   );
+  app.post("/api/conversations/:id/delegations", async (c) => {
+    const body = z
+      .object({
+        requestId: z.string().trim().min(1).max(500),
+        botId: z.string().trim().min(1).max(128),
+        prompt: z.string().trim().min(1).max(12000),
+        brief: z.string().trim().max(500).optional(),
+        sourcePath: z.string().trim().min(1).max(2048).optional(),
+        replacementIntent: z.literal("reviewed_replace_text").optional(),
+        suppliedText: z.string().trim().min(1).max(4000).optional(),
+      })
+      .parse(await c.req.json());
+    return c.json(
+      await agent.createDelegatedTask(c.get("owner"), {
+        ...body,
+        conversationId: c.req.param("id"),
+      }),
+      201,
+    );
+  });
   app.get("/api/composio/toolkits", async (c) => {
     const search = z
       .string()
@@ -280,6 +312,9 @@ export async function createApp(
       ),
     );
   });
+  app.post("/api/actions/:id/verify-file", async (c) =>
+    c.json(await actions.reconcileLocalFile(c.get("owner"), c.req.param("id"))),
+  );
   app.get("/api/drafts", async (c) => c.json(await db.list(c.get("owner"), "drafts")));
   app.post("/api/drafts", async (c) => {
     const body = emailDraftSchema.extend({ id: z.string().optional() }).parse(await c.req.json());
