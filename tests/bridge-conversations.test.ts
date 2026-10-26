@@ -56,14 +56,17 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
     Object.assign(row, await c.req.json());
     return c.json({ session: row });
   });
-  remote.get("/api/sessions/:id/messages", (c) =>
-    c.json({
-      data: [
-        { id: 1, role: "user", content: "remember the blue bicycle" },
-        { id: 2, role: "assistant", content: "I will.", tool_calls: null },
-      ],
-    }),
-  );
+  const history = [
+    { id: 1, role: "user", content: "remember the blue bicycle" },
+    { id: 2, role: "assistant", content: "I will.", tool_calls: null },
+  ];
+  remote.get("/api/sessions/:id/messages", (c) => {
+    const offset = Number(c.req.query("offset") || 0),
+      limit = Number(c.req.query("limit") || 500);
+    const start =
+      c.req.query("order") === "latest" ? Math.max(0, history.length - offset - limit) : offset;
+    return c.json({ data: history.slice(start, start + limit) });
+  });
   const server = serve({ fetch: remote.fetch, hostname: "127.0.0.1", port: 0 });
   if (!server.listening) await once(server, "listening");
   const address = server.address();
@@ -92,7 +95,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-  return { sessions, calls, make, request, streamFrames, cfg };
+  return { sessions, calls, make, request, streamFrames, cfg, history };
 }
 
 test("creating a conversation is idempotent and uses one canonical Hermes identity", async (t) => {
@@ -176,6 +179,23 @@ test("Hermes history survives bridge recreation and unrelated sessions stay priv
   assert.equal((await f.request(f.make(), `/conversations/${impostorId}/messages`)).status, 404);
 });
 
+test("saved history includes older pages in chronological order", async (t) => {
+  const f = await fixture(t),
+    app = f.make();
+  f.history.splice(
+    0,
+    f.history.length,
+    ...Array.from({ length: 503 }, (_, id) => ({ id, role: "user", content: `message ${id}` })),
+  );
+  const created = await (await f.request(app, "/conversations", { id: "long-history" })).json();
+  const response = await f.request(app, `/conversations/${created.id}/messages`);
+  assert.equal(response.status, 200);
+  const { messages } = await response.json();
+  assert.equal(messages.length, 503);
+  assert.equal(messages[0].content, "message 0");
+  assert.equal(messages[502].content, "message 502");
+});
+
 test("real Hermes tool lifecycle produces AG-UI tool cards without inventing tool output", async (t) => {
   const f = await fixture(t);
   f.streamFrames.push(
@@ -202,6 +222,38 @@ test("real Hermes tool lifecycle produces AG-UI tool cards without inventing too
   assert.ok(result);
   assert.equal(JSON.parse(result.content).preview, "Finished search");
   assert.equal(JSON.parse(result.content).fullOutputAvailable, false);
+});
+
+test("overlapping same-name tool results stay unattributed without upstream call IDs", async (t) => {
+  const f = await fixture(t);
+  f.streamFrames.push(
+    { event: "tool.started", data: { tool_name: "terminal", args: { command: "first" } } },
+    { event: "tool.started", data: { tool_name: "terminal", args: { command: "second" } } },
+    { event: "tool.completed", data: { tool_name: "terminal", preview: "second finished first" } },
+    { event: "tool.failed", data: { tool_name: "terminal", preview: "first failed last" } },
+    { event: "assistant.delta", data: { delta: "Finished." } },
+    { event: "done", data: {} },
+  );
+  const app = createBridgeApp(f.cfg, { upstream: createHermesUpstream(f.cfg) });
+  const response = await f.request(app, "/run", {
+    threadId: "overlap-tools",
+    runId: "overlap-1",
+    messages: [{ role: "user", content: "run both" }],
+  });
+  const events = (await response.text())
+    .split("\n\n")
+    .filter(Boolean)
+    .map((frame) => JSON.parse(frame.replace(/^data: /, "")));
+  const results = events
+    .filter((e) => e.type === "TOOL_CALL_RESULT")
+    .map((e) => JSON.parse(e.content));
+  assert.equal(results.length, 2);
+  assert.ok(results.every((r) => r.attributionUnknown === true));
+  assert.ok(
+    results.every(
+      (r) => !r.preview.includes("finished first") && !r.preview.includes("failed last"),
+    ),
+  );
 });
 
 test("partial streams and failed Hermes runs never become successful replies", async (t) => {
@@ -252,6 +304,53 @@ test("SSE survives CRLF split across transport chunks", async () => {
     { event: "assistant.delta", data: '{"delta":"hello"}' },
     { event: "done", data: "{}" },
   ]);
+});
+
+test("unregistered canonical IDs cannot be adopted, discovered, read, changed, or run", async (t) => {
+  const f = await fixture(t),
+    id = sessionIdFor("foreign-owned-session");
+  f.sessions.set(id, {
+    id,
+    source: "api_server",
+    title: "Private",
+    archived: false,
+    started_at: 1,
+  });
+  const app = f.make();
+  assert.equal((await f.request(app, `/conversations/${id}/messages`)).status, 404);
+  assert.equal(
+    (await f.request(app, `/conversations/${id}`, { title: "changed" }, "PATCH")).status,
+    404,
+  );
+  assert.equal((await f.request(app, "/conversations", { id })).status, 404);
+  assert.equal(
+    (await f.request(app, "/conversations", { id: "foreign-owned-session" })).status,
+    409,
+  );
+  assert.deepEqual((await (await f.request(app, "/conversations")).json()).conversations, []);
+  const real = createBridgeApp(f.cfg, { upstream: createHermesUpstream(f.cfg) });
+  const response = await f.request(real, "/run", {
+    threadId: id,
+    runId: "foreign",
+    messages: [{ role: "user", content: "hello" }],
+  });
+  const frames = await response.text();
+  assert.ok(frames.includes('"RUN_ERROR"'));
+  assert.ok(!frames.includes('"RUN_FINISHED"'));
+  assert.equal(f.sessions.get(id)?.title, "Private");
+});
+
+test("concurrent creation returns one owned identity without dropping other registrations", async (t) => {
+  const f = await fixture(t),
+    app = f.make();
+  const responses = await Promise.all(
+    ["same-seed", "same-seed", "other-seed"].map((id) => f.request(app, "/conversations", { id })),
+  );
+  assert.ok(responses.every((r) => r.ok));
+  const created = await Promise.all(responses.map((r) => r.json()));
+  assert.equal(created[0].id, created[1].id);
+  const listed = await (await f.request(f.make(), "/conversations")).json();
+  assert.equal(listed.conversations.length, 2);
 });
 
 const token = "bridge-conversations-test-token";

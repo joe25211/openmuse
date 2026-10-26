@@ -11,7 +11,11 @@
  *     event: done | error
  */
 
-import { createHash } from "node:crypto";
+import { Conversations } from "./conversations.ts";
+import { sessionIdFor } from "./identity.ts";
+
+export { sessionIdFor } from "./identity.ts";
+
 import type { BridgeConfig } from "./config.ts";
 import type { UpstreamAgent, UpstreamEvent } from "./upstream.ts";
 
@@ -58,13 +62,6 @@ export async function* sseFrames(body: ReadableStream<Uint8Array>): AsyncGenerat
   }
 }
 
-/** A stable, opaque session id per OpenMuse conversation. Derived, never stored. */
-export function sessionIdFor(threadId: string): string {
-  return /^om_[a-f0-9]{32}$/.test(threadId)
-    ? threadId
-    : `om_${createHash("sha256").update(threadId).digest("hex").slice(0, 32)}`;
-}
-
 function jsonOf(frame: SseFrame): Record<string, unknown> {
   try {
     const parsed: unknown = JSON.parse(frame.data);
@@ -80,24 +77,7 @@ export function createHermesUpstream(config: BridgeConfig): UpstreamAgent {
     "Content-Type": "application/json",
   };
   const base = config.hermesBaseUrl;
-  const ensured = new Set<string>();
-
-  async function ensureSession(sessionId: string, signal: AbortSignal): Promise<string | null> {
-    if (ensured.has(sessionId)) return null;
-    const response = await fetch(`${base}/api/sessions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ id: sessionId, source: "openmuse" }),
-      signal,
-    });
-    // 409 means a previous bridge process already created it: that is the desired state.
-    if (response.status === 409 || response.ok) {
-      ensured.add(sessionId);
-      return null;
-    }
-    const detail = await response.text().catch(() => "");
-    return `Hermes rejected the session (HTTP ${response.status})${detail ? `: ${detail.slice(0, 200)}` : ""}`;
-  }
+  const conversations = new Conversations(config);
 
   return {
     async probe(signal) {
@@ -114,11 +94,13 @@ export function createHermesUpstream(config: BridgeConfig): UpstreamAgent {
 
     async *run(input, signal): AsyncGenerator<UpstreamEvent> {
       const sessionId = sessionIdFor(input.threadId);
-      const sessionError = await ensureSession(sessionId, signal);
-      if (sessionError) {
-        yield { type: "error", message: sessionError };
+      try {
+        await conversations.create(input.threadId);
+      } catch {
+        yield { type: "error", message: "Conversation is unavailable or not owned by OpenMuse" };
         return;
       }
+      if (signal.aborted) return;
 
       let response: Response;
       try {
@@ -154,6 +136,7 @@ export function createHermesUpstream(config: BridgeConfig): UpstreamAgent {
       let sawDone = false;
       let toolSequence = 0;
       const pendingTools = new Map<string, string[]>();
+      const ambiguousTools = new Set<string>();
       for await (const frame of sseFrames(response.body)) {
         if (frame.event === "assistant.delta") {
           const { delta } = jsonOf(frame);
@@ -164,7 +147,9 @@ export function createHermesUpstream(config: BridgeConfig): UpstreamAgent {
           const data = jsonOf(frame),
             name = String(data.tool_name || "unknown_tool");
           const id = `hermes-${input.runId}-${++toolSequence}`;
-          pendingTools.set(name, [...(pendingTools.get(name) || []), id]);
+          const pending = pendingTools.get(name) || [];
+          if (pending.length) ambiguousTools.add(name);
+          pendingTools.set(name, [...pending, id]);
           yield { type: "tool_start", id, name, args: data.args ?? {} };
         } else if (frame.event === "tool.completed" || frame.event === "tool.failed") {
           const data = jsonOf(frame),
@@ -174,12 +159,18 @@ export function createHermesUpstream(config: BridgeConfig): UpstreamAgent {
             yield { type: "error", message: "Hermes returned an unmatched tool result" };
             return;
           }
+          // The session stream omits call IDs. Overlap cannot be safely matched by name.
+          const attributionUnknown = ambiguousTools.has(name);
           yield {
             type: "tool_result",
             id,
-            preview: String(data.preview || ""),
-            failed: frame.event === "tool.failed",
+            preview: attributionUnknown
+              ? "Result cannot be attributed: overlapping tool calls have no upstream call IDs."
+              : String(data.preview || ""),
+            failed: !attributionUnknown && frame.event === "tool.failed",
+            ...(attributionUnknown ? { attributionUnknown: true } : {}),
           };
+          if (!pendingTools.get(name)?.length) ambiguousTools.delete(name);
         } else if (
           frame.event === "error" ||
           frame.event === "run.failed" ||

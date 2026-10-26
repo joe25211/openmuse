@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import { type Message, MessageSchema } from "@ag-ui/core";
 import { z } from "zod";
 import type { BridgeConfig } from "./config.ts";
 import { ConversationIndex } from "./conversation-index.ts";
-import { sessionIdFor } from "./hermes.ts";
+import { sessionIdFor } from "./identity.ts";
 
 export class ConversationError extends Error {
   constructor(
@@ -23,6 +24,7 @@ const sessionSchema = z.object({
   preview: z.string().nullish(),
 });
 export type HermesConversation = z.infer<typeof sessionSchema>;
+const creating = new Map<string, Promise<{ id: string; existing: boolean }>>();
 
 /** Only the bridge knows Hermes routes or holds its bearer credential. */
 export class Conversations {
@@ -43,21 +45,6 @@ export class Conversations {
 
   async list(limit: number, offset: number) {
     const found = new Map<string, HermesConversation>();
-    for (let page = 0; page < 50; page++) {
-      const result = await this.request(
-        `/api/sessions?source=api_server&limit=200&offset=${page * 200}`,
-      );
-      if (!Array.isArray(result.data))
-        throw new ConversationError("Hermes returned invalid conversation data");
-      for (const item of result.data) {
-        const parsed = sessionSchema.safeParse(item);
-        if (parsed.success) found.set(parsed.data.id, parsed.data);
-      }
-      if (!result.has_more) break;
-      if (page === 49)
-        throw new ConversationError("Conversation list exceeds the supported window");
-    }
-    await this.index.remember([...found.keys()]);
     for (const id of await this.index.ids()) {
       if (found.has(id)) continue;
       try {
@@ -77,34 +64,39 @@ export class Conversations {
 
   async messages(id: string) {
     await this.get(id);
-    const body = await this.request(`/api/sessions/${id}/messages?limit=500&order=latest`);
-    if (!Array.isArray(body.data))
-      throw new ConversationError("Hermes returned invalid message history");
     const messages: Message[] = [];
-    for (const [index, value] of body.data.entries()) {
-      if (!value || typeof value !== "object")
+    for (let offset = 0; ; offset += 500) {
+      const body = await this.request(
+        `/api/sessions/${id}/messages?limit=500&offset=${offset}&order=oldest&include_compacted=true`,
+      );
+      if (!Array.isArray(body.data) || body.data.length > 500)
         throw new ConversationError("Hermes returned invalid message history");
-      const row = value as Record<string, unknown>;
-      if (!["assistant", "user", "tool"].includes(String(row.role))) continue;
-      const content =
-        typeof row.content === "string"
-          ? row.content
-          : row.content == null
-            ? ""
-            : JSON.stringify(row.content);
-      const candidate = {
-        id: `${id}:${row.id ?? index}`,
-        role: row.role,
-        content,
-        ...(row.role === "assistant" && Array.isArray(row.tool_calls)
-          ? { toolCalls: row.tool_calls }
-          : {}),
-        ...(row.role === "tool" ? { toolCallId: row.tool_call_id } : {}),
-      };
-      const parsed = MessageSchema.safeParse(candidate);
-      if (!parsed.success)
-        throw new ConversationError("Hermes returned unsupported message history");
-      messages.push(parsed.data);
+      for (const [index, value] of body.data.entries()) {
+        if (!value || typeof value !== "object")
+          throw new ConversationError("Hermes returned invalid message history");
+        const row = value as Record<string, unknown>;
+        if (!["assistant", "user", "tool"].includes(String(row.role))) continue;
+        const content =
+          typeof row.content === "string"
+            ? row.content
+            : row.content == null
+              ? ""
+              : JSON.stringify(row.content);
+        const candidate = {
+          id: `${id}:${row.id ?? offset + index}`,
+          role: row.role,
+          content,
+          ...(row.role === "assistant" && Array.isArray(row.tool_calls)
+            ? { toolCalls: row.tool_calls }
+            : {}),
+          ...(row.role === "tool" ? { toolCallId: row.tool_call_id } : {}),
+        };
+        const parsed = MessageSchema.safeParse(candidate);
+        if (!parsed.success)
+          throw new ConversationError("Hermes returned unsupported message history");
+        messages.push(parsed.data);
+      }
+      if (body.data.length < 500) break;
     }
     return { messages };
   }
@@ -142,7 +134,12 @@ export class Conversations {
   }
 
   async get(id: string): Promise<HermesConversation> {
-    if (!/^om_[a-f0-9]{32}$/.test(id)) throw new ConversationError("Conversation not found", 404);
+    if (!/^om_[a-f0-9]{32}$/.test(id) || !(await this.index.ids()).includes(id))
+      throw new ConversationError("Conversation not found", 404);
+    return this.fetchSession(id);
+  }
+
+  private async fetchSession(id: string): Promise<HermesConversation> {
     const body = await this.request(`/api/sessions/${id}`);
     const parsed = sessionSchema.safeParse(body.session);
     if (!parsed.success || parsed.data.id !== id)
@@ -152,18 +149,35 @@ export class Conversations {
 
   async create(seed?: string): Promise<{ id: string; existing: boolean }> {
     const id = sessionIdFor(seed || randomUUID());
-    let existing = false;
+    const key = `${resolve(this.config.dataDir)}:${id}`;
+    const pending = creating.get(key);
+    if (pending) return pending;
+    const operation = this.createOwned(seed, id);
+    creating.set(key, operation);
     try {
-      await this.request("/api/sessions", {
-        method: "POST",
-        body: JSON.stringify({ id, source: "api_server" }),
-      });
-    } catch (error) {
-      if (!(error instanceof ConversationError) || error.status !== 409) throw error;
-      existing = true;
+      return await operation;
+    } finally {
+      if (creating.get(key) === operation) creating.delete(key);
     }
-    await this.get(id); // A conflict alone does not prove this is an OpenMuse session.
+  }
+
+  private async createOwned(
+    seed: string | undefined,
+    id: string,
+  ): Promise<{ id: string; existing: boolean }> {
+    if ((await this.index.ids()).includes(id)) {
+      await this.get(id);
+      return { id, existing: true };
+    }
+    // An opaque ID supplied by a client must already belong to this bridge.
+    if (/^om_[a-f0-9]{32}$/.test(seed || ""))
+      throw new ConversationError("Conversation not found", 404);
+    await this.request("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({ id, source: "api_server" }),
+    }); // A conflict is not ownership: never adopt an unrelated existing session.
+    await this.fetchSession(id);
     await this.index.remember([id]);
-    return { id, existing };
+    return { id, existing: false };
   }
 }

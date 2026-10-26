@@ -197,6 +197,7 @@ export function createBridgeApp(config: BridgeConfig, deps: { upstream: Upstream
               content: JSON.stringify({
                 preview: event.preview,
                 failed: event.failed,
+                ...(event.attributionUnknown ? { attributionUnknown: true } : {}),
                 fullOutputAvailable: false,
               }),
             });
