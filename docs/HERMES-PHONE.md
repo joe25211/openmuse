@@ -55,7 +55,7 @@ Install only after `adb devices -l` shows the intended phone as `device`, not `u
 adb -s PHONE_SERIAL install -r apps/mobile/android/app/build/outputs/apk/release/app-release.apk
 ```
 
-The phone needs Tailscale connectivity to GPC and the OpenMuse access key at first sign-in. Do not put this access key, the bridge token, or the Hermes API key into source or the APK.
+The phone needs Tailscale connectivity to GPC and the OpenMuse access key at first sign-in. Do not put this access key, the bridge token, or the Hermes API key into source or the APK. On Android, only the returned session token is retained in Expo SecureStore (Android Keystore-backed storage), scoped to this backend URL and excluded from Android backup. The access key itself is not stored. Expired or revoked sessions require sign-in again; network errors do not delete the saved token.
 
 ### Update and rollback
 
@@ -79,7 +79,7 @@ Rollback: restore the previous `dist/`, restart those two services, and reinstal
 
 ## Not yet verified or implemented
 
-- The standalone APK is installed and its welcome/access-key screen renders on a USB-connected Pixel 7 (Android 17). Sign-in, chat interaction, and background/foreground behavior still require the on-device smoke test.
+- USB installation and signed-in chat were verified on a Pixel 7 (Android 17): a message sent from the phone produced a real Hermes terminal-tool card and the requested reply. The final update removes misleading built-in-worker warnings and adds secure session persistence. Its force-stop/reopen acceptance check is still pending the user's sign-in on that updated build.
 - Approvals, durable run reconnection, native worker-status cards, and push notifications are follow-up work. Existing Relay notifications do not implement these for OpenMuse.
 - The current chat-stream path does not guarantee work survival after a disconnect. Do not advertise durable background worker monitoring or phone approvals until the durable-run integration is built and tested.
 - This is a single-owner deployment. Tailnet access and the OpenMuse access key protect the API; it is not a public multi-user service.

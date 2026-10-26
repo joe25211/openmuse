@@ -1,4 +1,5 @@
 import { CopilotKitProvider } from "@copilotkit/react-native/headless";
+import * as SecureStore from "expo-secure-store";
 import { StatusBar } from "expo-status-bar";
 import {
   Bell,
@@ -16,6 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
+  Platform,
   Pressable,
   ScrollView,
   Text,
@@ -38,6 +40,7 @@ import { ComputerEntry } from "./src/computer";
 import { ComputerDraftProvider } from "./src/computer-drafts";
 import { builtinInfrastructureVisible } from "./src/computer-status";
 import { Details } from "./src/details";
+import { restoreSavedSession, sessionStorageKey } from "./src/saved-session";
 import { BrowserScreen, CalendarScreen, FilesScreen, MailScreen } from "./src/screens";
 import { ThreadsProvider, ThreadsSheet, useMuseThread } from "./src/threads";
 import { Button, Card, colors, ErrorNotice, Field, IconButton, Mascot, s } from "./src/ui";
@@ -77,6 +80,11 @@ export default function App() {
     setError("");
     try {
       const session = await createSession(key);
+      if (Platform.OS !== "web") {
+        await SecureStore.setItemAsync(sessionStorageKey(API_URL), session.token, {
+          keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+        });
+      }
       setToken(session.token);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -85,7 +93,31 @@ export default function App() {
     }
   }, []);
   useEffect(() => {
-    void connect();
+    if (Platform.OS === "web") {
+      void connect();
+      return;
+    }
+    let active = true;
+    void restoreSavedSession(SecureStore, sessionStorageKey(API_URL), async (saved) => {
+      const response = await fetch(`${API_URL}/api/copilotkit/info`, {
+        headers: { Authorization: `Bearer ${saved}` },
+      });
+      if (response.status === 401 || response.status === 403) return false;
+      if (!response.ok) throw new Error(`GPC connection failed (HTTP ${response.status})`);
+      return true;
+    })
+      .then((saved) => {
+        if (active && saved) setToken(saved);
+      })
+      .catch((error) => {
+        if (active) setError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (active) setBusy(false);
+      });
+    return () => {
+      active = false;
+    };
   }, [connect]);
   return (
     <SafeAreaProvider>
