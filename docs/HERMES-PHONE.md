@@ -57,6 +57,14 @@ adb -s PHONE_SERIAL install -r apps/mobile/android/app/build/outputs/apk/release
 
 The phone needs Tailscale connectivity to GPC and the OpenMuse access key at first sign-in. Do not put this access key, the bridge token, or the Hermes API key into source or the APK. On Android, only the returned session token is retained in Expo SecureStore (Android Keystore-backed storage), scoped to this backend URL and excluded from Android backup. The access key itself is not stored. Expired or revoked sessions require sign-in again; network errors do not delete the saved token.
 
+### Google connection
+
+Gmail and Google Calendar are connected for this deployment with read-only permissions: inbox access, calendar discovery, and calendar event reads. The `OpenMuse GPC` OAuth client is marked **Use this client for an AI-powered agent**, with callback `https://gpc.tailb0557b.ts.net:8788/api/google/callback`. Client credentials remain in the private GPC environment; granted tokens use the existing encrypted credential store. Sending mail and changing events have not been authorized.
+
+Verification: repeated authenticated workspace reads over Tailscale returned HTTP 200 and 30 real inbox messages; calendar discovery returned three calendars. The USB-connected Pixel displayed the connected account and all three read permissions after an app restart. Inbox detail reads are limited to batches of five to avoid Gmail rejecting the previous 30-request burst.
+
+The shared Google Cloud project's consent screen is still **External / Testing**. Google expires these Gmail/Calendar refresh tokens after seven days; sustained unattended use requires a deliberate move to Production and fresh authorization. Do not change the shared project's publishing status as an incidental setup step. These checks verify the Google connection and app data surfaces, not a new Google tool adapter for Hermes.
+
 ### Update and rollback
 
 Before rebuilding/redeploying, keep the previous `dist/` and APK. Build, run tests, then restart **only** these OpenMuse services:

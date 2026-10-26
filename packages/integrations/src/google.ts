@@ -661,15 +661,25 @@ export class GoogleClient {
     const list = z
       .object({ messages: z.array(z.object({ id: z.string() })).default([]) })
       .parse(await this.request(`${GMAIL}/messages?${params}`));
-    return Promise.all(
-      list.messages
-        .slice(0, 30)
-        .map(async ({ id }) =>
-          this.mapMessage(
-            messageSchema.parse(await this.request(`${GMAIL}/messages/${idPath(id)}?format=full`)),
-          ),
-        ),
-    );
+    const messages = list.messages.slice(0, 30);
+    const mail: Mail[] = [];
+    // Leave quota headroom for other workspace reads instead of launching all 30 at once.
+    for (let offset = 0; offset < messages.length; offset += 5) {
+      mail.push(
+        ...(await Promise.all(
+          messages
+            .slice(offset, offset + 5)
+            .map(async ({ id }) =>
+              this.mapMessage(
+                messageSchema.parse(
+                  await this.request(`${GMAIL}/messages/${idPath(id)}?format=full`),
+                ),
+              ),
+            ),
+        )),
+      );
+    }
+    return mail;
   }
 
   /** At most 100 occurrences in a bounded window, beginning at local midnight by default. */

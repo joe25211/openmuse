@@ -88,6 +88,33 @@ test("mail reads nested plain text and attachment references over authenticated 
   assert.deepEqual(mail.attachments, ["msg1:attach1:Permission%3A%20form.pdf"]);
 });
 
+test("mail loads a full inbox without exceeding Google's concurrent request limit", async () => {
+  let active = 0;
+  let peak = 0;
+  const messages = Array.from({ length: 30 }, (_, index) => ({ id: `msg${index}` }));
+  const client = clientWith(async (request) => {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/messages")) return json({ messages });
+    active++;
+    peak = Math.max(peak, active);
+    try {
+      if (active > 5)
+        return json({ error: { message: "Too many concurrent requests for user." } }, 429);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const id = url.pathname.split("/").at(-1);
+      return json({ id, threadId: `thread-${id}` });
+    } finally {
+      active--;
+    }
+  });
+  const mail = await client.listMail();
+  assert.deepEqual(
+    mail.map((message) => message.id),
+    messages.map((message) => message.id),
+  );
+  assert.ok(peak <= 5, `Observed ${peak} concurrent Gmail reads`);
+});
+
 test("mail decodes folded adjacent encoded words without inserting header whitespace", async () => {
   const encodedWord = (value: string) => `=?UTF-8?B?${Buffer.from(value).toString("base64")}?=`;
   for (const separator of [" ", "\t", "\r\n ", "\r\n\t", " \r\n \t"]) {
