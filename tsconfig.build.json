@@ -7,6 +7,6 @@
     "rootDir": ".",
     "sourceMap": true
   },
-  "include": ["apps/server/**/*.ts", "packages/**/*.ts"],
+  "include": ["apps/server/**/*.ts", "apps/bridge/**/*.ts", "packages/**/*.ts"],
   "exclude": ["node_modules", "tests", "apps/mobile", "apps/worker"]
 }

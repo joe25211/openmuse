@@ -24,7 +24,9 @@
     "build:ios": "pnpm --dir apps/mobile build:ios",
     "build:android": "pnpm --dir apps/mobile build:android",
     "dev:worker": "tsx apps/server/src/worker-entry.ts",
+    "dev:bridge": "tsx watch apps/bridge/src/index.ts",
     "start:worker": "node dist/apps/server/src/worker-entry.js",
+    "start:bridge": "node dist/apps/bridge/src/index.js",
     "dev:browser": "node --env-file=.env --import tsx apps/worker/src/index.ts",
     "test:computer": "tsx --test apps/computer/smoke.test.ts",
     "test:computer:e2b-desktop": "tsx --test apps/computer/e2b-desktop-smoke.test.ts"
