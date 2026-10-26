@@ -77,9 +77,9 @@ Rollback: restore the previous `dist/`, restart those two services, and reinstal
 - Tool events preserve actual names and arguments. The session-stream protocol currently omits tool-call IDs and full output. Overlapping same-name calls are marked unattributed; the bridge does not guess which invocation produced a result.
 - A broken stream or failed turn is an error, never a successful empty answer.
 
-## Not yet verified or implemented
+## Verification and remaining limits
 
-- USB installation and signed-in chat were verified on a Pixel 7 (Android 17): a message sent from the phone produced a real Hermes terminal-tool card and the requested reply. The final update removes misleading built-in-worker warnings and adds secure session persistence. Its force-stop/reopen acceptance check is still pending the user's sign-in on that updated build.
+- USB installation and signed-in chat are verified on a Pixel 7 (Android 17): a message sent from the phone produced a real Hermes terminal-tool card and the requested reply. The final build passed force-stop/reopen without key entry, reloaded main and side-chat history, and successfully sent another live message after restoration. The misleading built-in-worker banner is absent.
 - Approvals, durable run reconnection, native worker-status cards, and push notifications are follow-up work. Existing Relay notifications do not implement these for OpenMuse.
 - The current chat-stream path does not guarantee work survival after a disconnect. Do not advertise durable background worker monitoring or phone approvals until the durable-run integration is built and tested.
 - This is a single-owner deployment. Tailnet access and the OpenMuse access key protect the API; it is not a public multi-user service.
