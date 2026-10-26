@@ -192,7 +192,7 @@ export interface Workspace {
   activity: ActivityEntry[];
   connections: Connection[];
   runtime: {
-    provider: "sample" | "model" | "openbot";
+    provider: "sample" | "model" | "agui" | "openbot";
     configured: boolean;
     openbotConfigured: boolean;
     richThreads?: boolean;

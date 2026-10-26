@@ -361,10 +361,10 @@ export class WorkspaceService {
         },
       ],
       runtime: {
-        provider: this.config.agentBackend === "sample" ? "sample" : "model",
+        provider: this.config.agentBackend,
         configured: agentConfigured(this.config),
         openbotConfigured: false,
-        richThreads: true,
+        richThreads: Boolean(this.config.intelligenceApiKey),
       },
     };
   }

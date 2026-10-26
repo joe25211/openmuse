@@ -18,6 +18,7 @@ import { BrowserService } from "./browser.ts";
 import { ComputerService, type DockerRunner } from "./computer.ts";
 import { computerRoutes } from "./computer-routes.ts";
 import type { Config } from "./config.ts";
+import { Conversations } from "./conversations.ts";
 import type { Store } from "./db.ts";
 import { agentRoutes } from "./engine/routes.ts";
 import { AgentService } from "./engine/service.ts";
@@ -30,7 +31,7 @@ import { WorkspaceService } from "./workspace.ts";
 export async function createApp(
   db: Store,
   config: Config,
-  options: { docker?: DockerRunner } = {},
+  options: { docker?: DockerRunner; fetch?: typeof fetch } = {},
 ) {
   const auth = await createAuth(db, config),
     files = new Files(db, config, auth),
@@ -210,6 +211,50 @@ export async function createApp(
       201,
     );
   });
+  const conversations = new Conversations(config, options.fetch);
+  const conversationId = z
+    .string()
+    .min(1)
+    .max(256)
+    .regex(/^[A-Za-z0-9_-]+$/, "Invalid conversation ID");
+  app.get("/api/conversations", async (c) => {
+    const query = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(100).default(20),
+        offset: z.coerce.number().int().min(0).default(0),
+      })
+      .parse(c.req.query());
+    return c.json(
+      await conversations.request(`/conversations?limit=${query.limit}&offset=${query.offset}`),
+    );
+  });
+  app.post("/api/conversations", async (c) => {
+    const body = z.object({ id: z.string().min(1).max(256).optional() }).parse(await c.req.json());
+    return c.json(await conversations.request("/conversations", "POST", body));
+  });
+  app.get("/api/conversations/:id/messages", async (c) =>
+    c.json(
+      await conversations.request(
+        `/conversations/${encodeURIComponent(conversationId.parse(c.req.param("id")))}/messages`,
+      ),
+    ),
+  );
+  app.patch("/api/conversations/:id", async (c) => {
+    const body = z
+      .object({ title: z.string().min(1).max(200).optional(), archived: z.boolean().optional() })
+      .refine(
+        (value) => value.title !== undefined || value.archived !== undefined,
+        "Provide title or archived",
+      )
+      .parse(await c.req.json());
+    return c.json(
+      await conversations.request(
+        `/conversations/${encodeURIComponent(conversationId.parse(c.req.param("id")))}`,
+        "PATCH",
+        body,
+      ),
+    );
+  });
   app.get("/api/main-thread", async (c) => {
     const owner = c.get("owner");
     await db.insertIfAbsent(owner, "conversation-settings", {
@@ -219,6 +264,12 @@ export async function createApp(
     });
     const main = await db.get<{ threadId: string }>(owner, "conversation-settings", "main");
     if (!main) throw new AppError("Main conversation could not be loaded", 503);
+    if (config.agentBackend === "agui") {
+      const ensured = z
+        .object({ id: z.string().min(1), existing: z.boolean() })
+        .parse(await conversations.request("/conversations", "POST", { id: main.threadId }));
+      return c.json({ threadId: ensured.id, existing: ensured.existing });
+    }
     if (intelligence) {
       try {
         await intelligence.getOrCreateThread({
