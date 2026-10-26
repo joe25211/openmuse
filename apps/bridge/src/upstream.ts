@@ -14,6 +14,8 @@ export interface UpstreamRun {
 
 export type UpstreamEvent =
   | { type: "text"; delta: string }
+  | { type: "tool_start"; id: string; name: string; args: unknown }
+  | { type: "tool_result"; id: string; preview: string; failed: boolean }
   | { type: "error"; message: string }
   | { type: "done" };
 

@@ -6,6 +6,7 @@
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
+import { EventType } from "@ag-ui/core";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
@@ -18,6 +19,7 @@ import {
   textMessageStart,
 } from "./agui.ts";
 import type { BridgeConfig } from "./config.ts";
+import { ConversationError, Conversations } from "./conversations.ts";
 import type { UpstreamAgent } from "./upstream.ts";
 
 const RunInput = z
@@ -61,11 +63,59 @@ export function tokenMatches(given: string | undefined, expected: string): boole
 
 export function createBridgeApp(config: BridgeConfig, deps: { upstream: UpstreamAgent }): Hono {
   const app = new Hono();
+  const conversations = new Conversations(config);
+  app.onError((error, c) => {
+    if (error instanceof ConversationError) return c.json({ error: error.message }, error.status);
+    if (error instanceof SyntaxError || error instanceof z.ZodError)
+      return c.json({ error: "Invalid conversation input" }, 400);
+    return c.json({ error: "Conversation request failed" }, 502);
+  });
 
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
     c.header("Cache-Control", "no-store");
     await next();
+  });
+
+  app.use("/conversations*", async (c, next) => {
+    if (!tokenMatches(c.req.header("authorization"), config.bridgeToken))
+      return c.json({ error: "Unauthorized" }, 401);
+    await next();
+  });
+
+  app.post("/conversations", async (c) => {
+    const input = z
+      .object({ id: z.string().min(1).max(200).optional() })
+      .strict()
+      .parse(await c.req.json());
+    const result = await conversations.create(input.id);
+    return c.json(result, result.existing ? 200 : 201);
+  });
+
+  app.get("/conversations", async (c) => {
+    const query = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(100).default(20),
+        offset: z.coerce.number().int().min(0).max(10000).default(0),
+      })
+      .parse(c.req.query());
+    return c.json(await conversations.list(query.limit, query.offset));
+  });
+
+  app.get("/conversations/:id/messages", async (c) =>
+    c.json(await conversations.messages(c.req.param("id"))),
+  );
+
+  app.patch("/conversations/:id", async (c) => {
+    const update = z
+      .object({
+        title: z.string().trim().min(1).max(200).optional(),
+        archived: z.boolean().optional(),
+      })
+      .strict()
+      .refine((v) => Object.keys(v).length > 0)
+      .parse(await c.req.json());
+    return c.json(await conversations.update(c.req.param("id"), update));
   });
 
   app.get("/health", async (c) => {
@@ -98,7 +148,8 @@ export function createBridgeApp(config: BridgeConfig, deps: { upstream: Upstream
       const controller = new AbortController();
       stream.onAbort(() => controller.abort());
 
-      const messageId = `msg_${input.runId}`;
+      let messageId = `msg_${input.runId}`;
+      let textSequence = 0;
       let streaming = false;
       let failed = false;
       const send = (event: unknown) => stream.writeSSE({ data: JSON.stringify(event) });
@@ -116,6 +167,39 @@ export function createBridgeApp(config: BridgeConfig, deps: { upstream: Upstream
               streaming = true;
             }
             await send(textMessageContent(messageId, event.delta));
+            continue;
+          }
+          if (event.type === "tool_start") {
+            if (streaming) {
+              await send(textMessageEnd(messageId));
+              streaming = false;
+              messageId = `msg_${input.runId}_${++textSequence}`;
+            }
+            await send({
+              type: EventType.TOOL_CALL_START,
+              toolCallId: event.id,
+              toolCallName: event.name,
+            });
+            await send({
+              type: EventType.TOOL_CALL_ARGS,
+              toolCallId: event.id,
+              delta: JSON.stringify(event.args),
+            });
+            await send({ type: EventType.TOOL_CALL_END, toolCallId: event.id });
+            continue;
+          }
+          if (event.type === "tool_result") {
+            await send({
+              type: EventType.TOOL_CALL_RESULT,
+              toolCallId: event.id,
+              messageId: `result_${event.id}`,
+              role: "tool",
+              content: JSON.stringify({
+                preview: event.preview,
+                failed: event.failed,
+                fullOutputAvailable: false,
+              }),
+            });
             continue;
           }
           if (event.type === "error") {

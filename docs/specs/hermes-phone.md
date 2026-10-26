@@ -1,6 +1,10 @@
 # Spec: Hermes Phone (v1 thin slice)
 
-Status: draft — awaiting seam confirmation
+Status: product direction confirmed — dedicated OpenMuse Android app; implementation in progress
+
+## Confirmed product boundary
+
+OpenMuse is a dedicated Android application. It is not a tab in Hermes Relay, a Relay plugin page, or a replacement name for Relay chat. The Android app provides the OpenMuse interface; Hermes on GPC owns reasoning, tools, memory, and worker dispatch. The existing Relay installation is separate and is not an installation prerequisite. Agent-initiated notifications in the dedicated app remain a required follow-up milestone after the working chat/history vertical slice; foreground polling alone does not meet that requirement.
 Branch: `feat/hermes-phone` (base: upstream `main` @ `50b016c`)
 Date: 2026-10-25
 
@@ -87,7 +91,7 @@ bridge talks to Hermes over loopback or the tailnet.
 - Downstream contract (what OpenMuse already speaks): AG-UI run input in, AG-UI event stream out — run start, text message start/content/end, tool call start/args/end/result, custom events, run finished/error, plus run cancellation.
 - Upstream contract (what Hermes already serves, verified on the live API server): a streamed chat turn that emits assistant deltas, assistant commentary, tool progress, approval requests, and terminal done/error frames; plus session create/list/read and message history; plus, for the durable path, runs with event streams, approval, steer, stop, and unknown-outcome resolution.
 - v1 uses the streamed chat turn, because it carries token deltas, tool progress, and approval requests in one connection. Run-level durability, reconnect, and unknown-outcome reconciliation move to the durable runs API in a later slice. The bridge's upstream client is written behind an interface so that switch is contained.
-- Conversation identity: an OpenMuse conversation maps one-to-one to a Hermes session. The bridge creates the Hermes session on first use and stores the mapping server-side. Thread ids are opaque to the phone.
+- Conversation identity: an OpenMuse conversation maps one-to-one to a Hermes session. The bridge derives `om_` plus the first 32 hexadecimal characters of `sha256(threadId)` and creates that session on first use. Do not trust client-supplied Hermes session IDs; retries must preserve conversation identity.
 - Credentials: the bridge holds the Hermes bearer key; the phone never sees it. The phone authenticates to the OpenMuse server exactly as it does today. The bridge is not directly reachable from the phone.
 - Honest degradation: unreachable Hermes is an error event, never a synthesized reply. Unconfirmed outcomes and refused approvals are surfaced as their own states, matching the vocabulary already used in this repository.
 

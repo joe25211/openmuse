@@ -42,7 +42,7 @@ export async function* sseFrames(body: ReadableStream<Uint8Array>): AsyncGenerat
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      buffer = (buffer + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
       let boundary = buffer.indexOf("\n\n");
       while (boundary !== -1) {
         const frame = parse(buffer.slice(0, boundary));
@@ -60,7 +60,9 @@ export async function* sseFrames(body: ReadableStream<Uint8Array>): AsyncGenerat
 
 /** A stable, opaque session id per OpenMuse conversation. Derived, never stored. */
 export function sessionIdFor(threadId: string): string {
-  return `om_${createHash("sha256").update(threadId).digest("hex").slice(0, 32)}`;
+  return /^om_[a-f0-9]{32}$/.test(threadId)
+    ? threadId
+    : `om_${createHash("sha256").update(threadId).digest("hex").slice(0, 32)}`;
 }
 
 function jsonOf(frame: SseFrame): Record<string, unknown> {
@@ -149,16 +151,40 @@ export function createHermesUpstream(config: BridgeConfig): UpstreamAgent {
         return;
       }
 
-      let sawText = false;
       let sawDone = false;
+      let toolSequence = 0;
+      const pendingTools = new Map<string, string[]>();
       for await (const frame of sseFrames(response.body)) {
         if (frame.event === "assistant.delta") {
           const { delta } = jsonOf(frame);
           if (typeof delta === "string" && delta) {
-            sawText = true;
             yield { type: "text", delta };
           }
-        } else if (frame.event === "error") {
+        } else if (frame.event === "tool.started") {
+          const data = jsonOf(frame),
+            name = String(data.tool_name || "unknown_tool");
+          const id = `hermes-${input.runId}-${++toolSequence}`;
+          pendingTools.set(name, [...(pendingTools.get(name) || []), id]);
+          yield { type: "tool_start", id, name, args: data.args ?? {} };
+        } else if (frame.event === "tool.completed" || frame.event === "tool.failed") {
+          const data = jsonOf(frame),
+            name = String(data.tool_name || "unknown_tool");
+          const id = pendingTools.get(name)?.shift();
+          if (!id) {
+            yield { type: "error", message: "Hermes returned an unmatched tool result" };
+            return;
+          }
+          yield {
+            type: "tool_result",
+            id,
+            preview: String(data.preview || ""),
+            failed: frame.event === "tool.failed",
+          };
+        } else if (
+          frame.event === "error" ||
+          frame.event === "run.failed" ||
+          frame.event === "run.cancelled"
+        ) {
           const { message } = jsonOf(frame);
           yield { type: "error", message: typeof message === "string" ? message : "Hermes failed" };
           return;
@@ -167,8 +193,8 @@ export function createHermesUpstream(config: BridgeConfig): UpstreamAgent {
           break;
         }
       }
-      // No terminal frame and nothing said is a broken turn, not an empty answer.
-      if (!sawDone && !sawText) {
+      // Partial output is not completion: a transport loss must never look successful.
+      if (!sawDone) {
         yield { type: "error", message: "The Hermes turn ended without a result" };
         return;
       }

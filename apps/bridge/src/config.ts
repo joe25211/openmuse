@@ -11,6 +11,8 @@ export interface BridgeConfig {
   hermesApiKey: string;
   /** Bearer token the OpenMuse server presents. Distinct from the Hermes key. */
   bridgeToken: string;
+  /** Stores only known conversation IDs, not messages or credentials. */
+  dataDir: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -45,5 +47,6 @@ export function bridgeConfig(env: Env = process.env): BridgeConfig {
     hermesBaseUrl,
     hermesApiKey,
     bridgeToken,
+    dataDir: env.BRIDGE_DATA_DIR || ".openmuse/bridge",
   };
 }
