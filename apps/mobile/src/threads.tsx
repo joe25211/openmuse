@@ -11,6 +11,8 @@ import {
 } from "lucide-react-native";
 import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { type ConversationMode, conversationMode, createConversation } from "./conversations";
+import { useHermesConversations } from "./hermes-conversations";
 import { Button, colors, ErrorNotice, Field, LinkRow, Sheet, s } from "./ui";
 import { useWorkspace } from "./workspace";
 
@@ -24,6 +26,10 @@ function newThreadId() {
 export type Selection = { id: string; existing: boolean };
 const ThreadContext = createContext<{
   enabled: boolean;
+  richThreads: boolean;
+  storageMode: ConversationMode;
+  creating: boolean;
+  createError: string;
   selection: Selection;
   visited: Selection[];
   mainId: string;
@@ -31,13 +37,19 @@ const ThreadContext = createContext<{
   error: string;
   retry: () => void;
   select: (selection: Selection) => void;
-  start: () => void;
+  start: () => Promise<boolean>;
   claimPrompt: (id: number) => boolean;
 } | null>(null);
 export function ThreadsProvider({ children }: { children: ReactNode }) {
   const { workspace, navigate, api } = useWorkspace();
   const handledPrompt = useRef(0);
-  const enabled = workspace.runtime.richThreads === true;
+  const richThreads = workspace.runtime.richThreads === true;
+  const storageMode = conversationMode(workspace.runtime);
+  const enabled = storageMode !== "local";
+  const [creating, setCreating] = useState(false);
+  const creatingRef = useRef(false);
+  const pendingId = useRef<string | undefined>(undefined);
+  const [createError, setCreateError] = useState("");
   const [selection, setSelection] = useState<Selection>({ id: "local", existing: false });
   const [visited, setVisited] = useState<Selection[]>([]);
   const [mainId, setMainId] = useState("local");
@@ -80,6 +92,10 @@ export function ThreadsProvider({ children }: { children: ReactNode }) {
           return true;
         },
         enabled,
+        richThreads,
+        storageMode,
+        creating,
+        createError,
         mainId,
         visited,
         loading,
@@ -87,7 +103,28 @@ export function ThreadsProvider({ children }: { children: ReactNode }) {
         retry: () => setAttempt((n) => n + 1),
         selection,
         select,
-        start: () => select({ id: newThreadId(), existing: false }),
+        start: async () => {
+          if (creatingRef.current) return false;
+          creatingRef.current = true;
+          setCreating(true);
+          setCreateError("");
+          try {
+            pendingId.current ||= newThreadId();
+            const next =
+              storageMode === "hermes"
+                ? await createConversation(api, pendingId.current)
+                : { id: pendingId.current, existing: false };
+            select(next);
+            pendingId.current = undefined;
+            return true;
+          } catch (e) {
+            setCreateError(e instanceof Error ? e.message : String(e));
+            return false;
+          } finally {
+            creatingRef.current = false;
+            setCreating(false);
+          }
+        },
       }}
     >
       {children}
@@ -102,6 +139,10 @@ export function useMuseThread() {
 export function ThreadsSheet({ onClose }: { onClose: () => void }) {
   const {
     enabled,
+    richThreads,
+    storageMode,
+    creating,
+    createError,
     selection,
     visited,
     mainId,
@@ -111,8 +152,15 @@ export function ThreadsSheet({ onClose }: { onClose: () => void }) {
     select,
     start,
   } = useMuseThread();
-  const { workspace, open, navigate, refresh } = useWorkspace();
-  const threads = useThreads({ agentId: "default", enabled, includeArchived: true, limit: 20 });
+  const { workspace, api, open, navigate, refresh } = useWorkspace();
+  const cloudThreads = useThreads({
+    agentId: "default",
+    enabled: storageMode === "cloud" && richThreads,
+    includeArchived: true,
+    limit: 20,
+  });
+  const hermesThreads = useHermesConversations(api, storageMode === "hermes");
+  const threads = storageMode === "hermes" ? hermesThreads : cloudThreads;
   const [editing, setEditing] = useState<string>();
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -160,13 +208,16 @@ export function ThreadsSheet({ onClose }: { onClose: () => void }) {
             <Button
               primary
               icon={Plus}
+              busy={creating}
               onPress={() => {
-                start();
-                onClose();
+                void start().then((created) => {
+                  if (created) onClose();
+                });
               }}
             >
               New side chat
             </Button>
+            <ErrorNotice error={createError} />
             <View style={[s.between, { marginTop: 12 }]}>
               <Text style={s.heading}>Side chats</Text>
               <Button small onPress={() => setArchived(!archived)}>
@@ -180,7 +231,8 @@ export function ThreadsSheet({ onClose }: { onClose: () => void }) {
                 Retry conversations
               </Button>
             )}
-            {!archived &&
+            {storageMode !== "hermes" &&
+              !archived &&
               visited
                 .filter(
                   (item) =>

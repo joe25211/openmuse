@@ -1,5 +1,4 @@
 import {
-  type Message,
   type ToolMessage,
   useAgent,
   useAgentContext,
@@ -35,6 +34,7 @@ import {
   showsRunError,
   threadLocked,
 } from "./conversation-run";
+import { loadConversationMessages, saveConversationMessages } from "./conversations";
 import { DesktopToolCard } from "./desktop-tool-card";
 import { confirmedJevSelection, displayJevUserMessage, latestJevPanelId } from "./jev-actions";
 import { JevInteractionContext, JevToolCard } from "./jev-tool-card";
@@ -214,9 +214,15 @@ export function ChatScreen({
 }) {
   const { api, workspace: w, refresh, navigate } = useWorkspace();
   const { data: agentWorkspace, refresh: refreshAgent } = useAgentWorkspace();
-  const { enabled: richThreads, mainId, claimPrompt } = useMuseThread();
+  const {
+    enabled: conversationsEnabled,
+    richThreads,
+    storageMode,
+    mainId,
+    claimPrompt,
+  } = useMuseThread();
   const selection = thread || { id: "local", existing: false };
-  const threadId = richThreads ? selection.id : "local-main";
+  const threadId = conversationsEnabled ? selection.id : "local-main";
   const agentId = `openmuse-${threadId}`;
   const { agent, isReady } = useAgent({ agentId, runtimeAgentId: "default", threadId });
   const { copilotkit } = useCopilotKit();
@@ -272,12 +278,12 @@ export function ChatScreen({
     setSyncing(false);
     const replay = agent.subscribe({
       onMessagesChanged: ({ messages }) => {
-        if (active && richThreads && messages.length) setLoaded(true);
+        if (active && storageMode === "cloud" && messages.length) setLoaded(true);
       },
     });
     async function hydrate() {
       try {
-        if (richThreads) {
+        if (storageMode === "cloud") {
           if (selection.existing) {
             // Replaying history re-emits past RUN_ERROR events; only connection failures block loading.
             // connectAgent returns once the thread is idle, so it also waits for a reply still
@@ -297,7 +303,7 @@ export function ChatScreen({
             }
           }
         } else {
-          const { messages } = await api.request<{ messages: Message[] }>("/api/conversation");
+          const messages = await loadConversationMessages(api, storageMode, threadId);
           if (active) agent.setMessages(messages);
         }
         if (active) setLoaded(true);
@@ -314,13 +320,23 @@ export function ChatScreen({
     return () => {
       active = false;
       replay.unsubscribe();
-      if (richThreads) void agent.detachActiveRun().catch(() => {});
+      if (storageMode === "cloud") void agent.detachActiveRun().catch(() => {});
     };
-  }, [agent, agentId, api, copilotkit, isReady, historyAttempt, richThreads, selection.existing]);
+  }, [
+    agent,
+    agentId,
+    api,
+    copilotkit,
+    isReady,
+    historyAttempt,
+    storageMode,
+    threadId,
+    selection.existing,
+  ]);
   const saveHistory = useCallback(async () => {
-    if (!richThreads) await api.request("/api/conversation", { messages: agent.messages }, "PUT");
+    await saveConversationMessages(api, storageMode, agent.messages);
     setSaveError("");
-  }, [agent, api, richThreads]);
+  }, [agent, api, storageMode]);
   /** Runs one turn; "held" means a queued message was refused by a lock and put back on hold. */
   const run = useCallback(
     async (message?: QueuedMessage): Promise<"held" | undefined> => {
@@ -641,7 +657,38 @@ export function ChatScreen({
                           candidate.role === "tool" && candidate.toolCallId === toolCall.id,
                       );
                       return (
-                        <View key={toolCall.id}>{renderToolCall({ toolCall, toolMessage })}</View>
+                        <View key={toolCall.id}>
+                          {renderToolCall({ toolCall, toolMessage }) || (
+                            <Card style={{ padding: 16, gap: 10 }}>
+                              <Text selectable style={s.heading}>
+                                {toolCall.function.name}
+                              </Text>
+                              <Text style={s.small}>
+                                {toolMessage
+                                  ? "Result received"
+                                  : replying && messages.indexOf(message) > latestUserIndex
+                                    ? "Working…"
+                                    : "No result received"}
+                              </Text>
+                              {!!toolCall.function.arguments && (
+                                <>
+                                  <Text style={s.small}>Arguments</Text>
+                                  <Text selectable style={s.text}>
+                                    {toolCall.function.arguments}
+                                  </Text>
+                                </>
+                              )}
+                              {toolMessage && (
+                                <>
+                                  <Text style={s.small}>Result</Text>
+                                  <Text selectable style={s.text}>
+                                    {toolMessage.content}
+                                  </Text>
+                                </>
+                              )}
+                            </Card>
+                          )}
+                        </View>
                       );
                     })}
                   </BrowserRunContext>
@@ -706,7 +753,7 @@ export function ChatScreen({
             )}
           </>
         )}
-        {(!richThreads || selection.id === mainId) && <BackgroundUpdates />}
+        {(!conversationsEnabled || selection.id === mainId) && <BackgroundUpdates />}
         {(busy || agent.isRunning) && (
           <View
             accessibilityLabel="Agent is working"
