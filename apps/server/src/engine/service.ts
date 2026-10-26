@@ -34,7 +34,7 @@ import { backgroundFailure } from "../log.ts";
 import { SearchService } from "../search.ts";
 import type { WorkspaceService } from "../workspace.ts";
 import { analyzeSpending } from "./finance.ts";
-import { executeModelTask } from "./model.ts";
+import { executeModelTask, taskAnswers } from "./model.ts";
 import {
   countPageDiff,
   describePageDiff,
@@ -342,6 +342,12 @@ export class AgentService {
     const task = await this.getTask(owner, id);
     if (task.status !== "waiting_input")
       throw new AppError("This task is not waiting for input", 409);
+    // Each run starts fresh, so keep every reply with its question, not just the latest.
+    const { answer: _latest, ...state } = task.state;
+    const answers = [
+      ...taskAnswers(task.state),
+      { ...(task.question ? { question: task.question } : {}), answer },
+    ];
     const next = await this.db.compareAndSwap<AgentTask>(
       owner,
       "tasks",
@@ -351,7 +357,7 @@ export class AgentService {
         status: "queued",
         question: null,
         input: { ...task.input, ...(fields ? { fields } : {}) },
-        state: { ...task.state, answer },
+        state: { ...state, answers },
         updatedAt: date(),
       },
     );
@@ -1090,11 +1096,14 @@ export class AgentService {
     const currentHash = hash(text);
     const previousHash =
       typeof task.state.lastHash === "string" ? task.state.lastHash : monitor.lastHash;
+    // Collapse whitespace in the watched text the same way as in the page text, so a
+    // trailing space from a phone keyboard or a line break in the value still matches.
+    const wanted = monitor.value.replace(/\s+/g, " ").trim().toLowerCase();
     const matched =
       monitor.condition === "change"
         ? Boolean(previousHash && previousHash !== currentHash)
         : monitor.condition === "contains"
-          ? text.toLowerCase().includes(monitor.value.toLowerCase())
+          ? text.toLowerCase().includes(wanted)
           : this.matchesPrice(text, Number(monitor.value));
     const previouslyMatched = Boolean(task.state.matched);
     // For change watches, keep the page lines and a relative-time-free fingerprint of the whole text.

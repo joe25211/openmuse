@@ -104,12 +104,13 @@ export const eventDraftSchema = z
       ctx.addIssue({ code: "custom", message: "End must be after a valid start", path: ["end"] });
     }
     const dateOnly = z.iso.date();
-    const timed = /^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/;
-    // Validate the calendar date separately so timed values can retain minute precision.
+    const timed = z.union([
+      z.iso.datetime({ offset: true }),
+      z.iso.datetime({ offset: true, precision: -1 }),
+    ]);
+    // Keep minute precision while validating the clock time as well as the date.
     const validTimestamp = (timestamp: string) =>
-      value.allDay
-        ? dateOnly.safeParse(timestamp).success
-        : timed.test(timestamp) && dateOnly.safeParse(timestamp.slice(0, 10)).success;
+      value.allDay ? dateOnly.safeParse(timestamp).success : timed.safeParse(timestamp).success;
     if (!validTimestamp(value.start) || !validTimestamp(value.end)) {
       ctx.addIssue({
         code: "custom",

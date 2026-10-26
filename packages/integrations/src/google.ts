@@ -298,7 +298,11 @@ const wellFormed = (value: string): string =>
   );
 
 function isAttachedPart(part: GmailPart): boolean {
-  return Boolean(part.filename) || part.mimeType === "message/rfc822";
+  return (
+    Boolean(part.filename) ||
+    part.mimeType === "message/rfc822" ||
+    headers(part).get("content-disposition")?.split(";")[0].trim().toLowerCase() === "attachment"
+  );
 }
 
 function mapMessage(message: z.infer<typeof messageSchema>): Mail {
@@ -309,13 +313,17 @@ function mapMessage(message: z.infer<typeof messageSchema>): Mail {
   const visit = (part: GmailPart, depth: number) => {
     if (depth > 30) throw new Error("Gmail message MIME nesting exceeds the limit");
     // Attachments carry their own content (or an attached message); never merge
-    // their parts into the parent text. A remote body has no filename: it is
-    // hydrated above and still counts as message text.
+    // their parts into the parent text. Unattached remote text is hydrated above
+    // and still counts as message text.
     const attached = isAttachedPart(part);
-    if (attached && part.body?.attachmentId)
+    if (attached && part.body?.attachmentId) {
+      const name =
+        part.filename ||
+        (part.mimeType === "message/rfc822" ? "forwarded-message.eml" : "attachment");
       attachments.push(
-        `${message.id}:${part.body.attachmentId}:${encodeURIComponent(wellFormed(part.filename || "forwarded-message.eml"))}`,
+        `${message.id}:${part.body.attachmentId}:${encodeURIComponent(wellFormed(name))}`,
       );
+    }
     if (
       !attached &&
       (part.mimeType === "text/plain" || part.mimeType === "text/html") &&
@@ -341,6 +349,7 @@ function mapMessage(message: z.infer<typeof messageSchema>): Mail {
   const time = message.internalDate
     ? Number(message.internalDate)
     : Date.parse(metadata.get("date") ?? "");
+  const date = new Date(time);
   const body = plain.length
     ? plain.join("\n\n")
     : html.length
@@ -355,7 +364,7 @@ function mapMessage(message: z.infer<typeof messageSchema>): Mail {
     to: addresses(metadata.get("to") ?? ""),
     subject: decodeHeader(metadata.get("subject") ?? "(No subject)"),
     body,
-    date: Number.isFinite(time) ? new Date(time).toISOString() : "",
+    date: Number.isFinite(date.getTime()) ? date.toISOString() : "",
     unread: message.labelIds.includes("UNREAD"),
     label: message.labelIds.includes("INBOX")
       ? "Inbox"

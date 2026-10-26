@@ -129,6 +129,25 @@ test("events accept valid leap days, month ends, and explicit offsets", () => {
   }
 });
 
+test("timed events reject 24:00 instead of moving the appointment to the next day", () => {
+  for (const time of ["24:00", "24:00:00", "24:00:00.000"]) {
+    for (const offset of ["Z", "-07:00", "+05:30"]) {
+      for (const field of ["start", "end"] as const) {
+        assert.equal(
+          eventDraftSchema.safeParse({
+            ...event,
+            start: "2000-01-01T10:00:00Z",
+            end: "2200-01-01T10:00:00Z",
+            [field]: `2026-10-10T${time}${offset}`,
+          }).success,
+          false,
+          `${field} must reject ${time}${offset}`,
+        );
+      }
+    }
+  }
+});
+
 test("events default calendarId, location, and description", () => {
   const parsed = eventDraftSchema.parse(event);
   assert.equal(parsed.calendarId, "primary");
