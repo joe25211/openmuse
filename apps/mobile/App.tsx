@@ -36,6 +36,7 @@ import { API_URL, createSession, MuseApi } from "./src/api";
 import { ChatScreen, WorkspaceTools } from "./src/chat";
 import { ComputerEntry } from "./src/computer";
 import { ComputerDraftProvider } from "./src/computer-drafts";
+import { builtinInfrastructureVisible } from "./src/computer-status";
 import { Details } from "./src/details";
 import { BrowserScreen, CalendarScreen, FilesScreen, MailScreen } from "./src/screens";
 import { ThreadsProvider, ThreadsSheet, useMuseThread } from "./src/threads";
@@ -241,6 +242,7 @@ function WorkspaceShell({
   prompt?: { id: number; text: string };
 }) {
   const { workspace, section, navigate, open } = useWorkspace();
+  const showBuiltinInfrastructure = builtinInfrastructureVisible(workspace.runtime.provider);
   const { data } = useAgentWorkspace();
   const {
     selection,
@@ -337,7 +339,7 @@ function WorkspaceShell({
                   {status}
                 </Text>
               </Pressable>
-              {section === "chat" && <ComputerEntry />}
+              {section === "chat" && showBuiltinInfrastructure && <ComputerEntry />}
             </View>
             <View style={{ position: "absolute", right: 0, top: 16 }}>
               <IconButton
@@ -390,7 +392,7 @@ function WorkspaceShell({
                 paddingHorizontal: desktop ? 42 : 17,
               }}
             >
-              <AgentStatus />
+              {showBuiltinInfrastructure && <AgentStatus />}
               {richThreads ? (
                 <>
                   <ErrorNotice error={threadsError} />
