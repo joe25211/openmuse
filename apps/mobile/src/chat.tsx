@@ -36,6 +36,7 @@ import {
 } from "./conversation-run";
 import { loadConversationMessages, saveConversationMessages } from "./conversations";
 import { DesktopToolCard } from "./desktop-tool-card";
+import { hermesToolResult, legacyToolCard } from "./hermes-tool-card";
 import { confirmedJevSelection, displayJevUserMessage, latestJevPanelId } from "./jev-actions";
 import { JevInteractionContext, JevToolCard } from "./jev-tool-card";
 import { MailToolCard } from "./mail-tool-card";
@@ -656,19 +657,25 @@ export function ChatScreen({
                         (candidate): candidate is ToolMessage =>
                           candidate.role === "tool" && candidate.toolCallId === toolCall.id,
                       );
+                      const running = replying && messages.indexOf(message) > latestUserIndex;
+                      const result = hermesToolResult(toolMessage?.content, running);
                       return (
                         <View key={toolCall.id}>
-                          {renderToolCall({ toolCall, toolMessage }) || (
+                          {legacyToolCard(storageMode, () =>
+                            renderToolCall({ toolCall, toolMessage }),
+                          ) || (
                             <Card style={{ padding: 16, gap: 10 }}>
                               <Text selectable style={s.heading}>
                                 {toolCall.function.name}
                               </Text>
                               <Text style={s.small}>
-                                {toolMessage
-                                  ? "Result received"
-                                  : replying && messages.indexOf(message) > latestUserIndex
-                                    ? "Working…"
-                                    : "No result received"}
+                                {storageMode === "hermes"
+                                  ? result.status
+                                  : toolMessage
+                                    ? "Result received"
+                                    : running
+                                      ? "Working…"
+                                      : "No result received"}
                               </Text>
                               {!!toolCall.function.arguments && (
                                 <>
@@ -680,9 +687,11 @@ export function ChatScreen({
                               )}
                               {toolMessage && (
                                 <>
-                                  <Text style={s.small}>Result</Text>
+                                  <Text style={s.small}>
+                                    {storageMode === "hermes" ? "Preview" : "Result"}
+                                  </Text>
                                   <Text selectable style={s.text}>
-                                    {toolMessage.content}
+                                    {storageMode === "hermes" ? result.result : toolMessage.content}
                                   </Text>
                                 </>
                               )}
